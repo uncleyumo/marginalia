@@ -2,7 +2,10 @@
 
 > 依据：`Marginalia-Prototype/`（`docs/DESIGN.md` v9 · `docs/impeccable-design-context.md` · `prototype/prototype.html` v9 · `pipeline/`）
 > 目标平台：Flutter / Android（minSdk 26，compileSdk 35，targetSdk 34）· 美式英语 · 离线优先
-> 状态：**待确认，尚未写任何业务代码**
+> 状态：**本文档写于动工之前，第 5 节的阶段表已全部过时。**
+> 代码现状请看 `Marginalia/docs/STATUS.md`——它说的是代码实际做到的事。
+> 本文档保留下来是因为第 1 节的**原型分析**（页面清单、视觉规范、交互不变量）
+> 仍然准确，且比 DESIGN.md 更好查。
 
 ---
 

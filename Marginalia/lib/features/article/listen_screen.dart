@@ -31,6 +31,7 @@ import 'package:flutter/material.dart';
 import '../../core/design/tokens.dart';
 import '../../core/widgets/back_label.dart';
 import '../../core/widgets/primitives.dart';
+import '../../data/handler.dart';
 import '../../domain/models.dart';
 
 // The contract lives with the audio layer, not here. A screen that declared its
@@ -71,11 +72,17 @@ class ListenScreen extends StatefulWidget {
     this.size = ListenSize.large,
     this.onSize,
     this.voiceLabel = '',
+    this.audioHandler,
   });
 
   final Article article;
   final SentencePlayer player;
   final VoidCallback onCountListen;
+
+  /// The lock screen and the media notification. Null when the platform refused
+  /// to start the foreground service — the tab still works in the foreground,
+  /// and this screen simply has nothing to publish to.
+  final MarginaliaAudioHandler? audioHandler;
 
   /// The header label is a button, so it needs somewhere to go.
   final VoidCallback onBack;
@@ -106,6 +113,7 @@ class _ListenScreenState extends State<ListenScreen> {
   @override
   void initState() {
     super.initState();
+    _attachTransport();
     unawaited(_playCurrent());
   }
 
@@ -114,8 +122,43 @@ class _ListenScreenState extends State<ListenScreen> {
     // Bump the generation first: a `_playFrom` further down the stack may still
     // be awaiting the engine, and it must not setState after this State is gone.
     _generation++;
+    // Hand the transport back BEFORE the State goes away, so a lock-screen tap
+    // arriving a moment later finds nobody home instead of calling into a
+    // disposed State.
+    widget.audioHandler?.detach();
     unawaited(widget.player.stop());
     super.dispose();
+  }
+
+  /// Let the lock screen, the media notification and the headset buttons drive
+  /// this screen. DESIGN's use case #2 is a commuter with the phone in a pocket,
+  /// and a transport that only exists inside the app does not serve it.
+  void _attachTransport() {
+    final MarginaliaAudioHandler? h = widget.audioHandler;
+    if (h == null) return;
+    h.onPlay = () {
+      if (!_playing) unawaited(_toggle());
+    };
+    h.onPause = () {
+      if (_playing) unawaited(_toggle());
+    };
+    h.onNext = () => unawaited(_jump(1));
+    h.onPrevious = () => unawaited(_jump(-1));
+    _publish();
+  }
+
+  /// State what is being heard, so the lock screen is never a guess.
+  void _publish() {
+    final MarginaliaAudioHandler? h = widget.audioHandler;
+    if (h == null) return;
+    if (_index < 0 || _index >= widget.article.sentences.length) return;
+    h.publish(
+      articleTitle: widget.article.title,
+      sentence: _current.english,
+      index: _index,
+      total: widget.article.sentences.length,
+      playing: _playing,
+    );
   }
 
   /// Play [index] and roll into the next one, unless the reader has interrupted.
@@ -127,18 +170,23 @@ class _ListenScreenState extends State<ListenScreen> {
   /// showed.
   Future<void> _playFrom(int index, int generation) async {
     setState(() => _index = index);
+    _publish();
     while (generation == _generation && mounted) {
       if (_index >= widget.article.sentences.length) {
         setState(() => _playing = false);
+        _publish();
         return;
       }
       setState(() => _playing = true);
+      _publish();
       await widget.player.play(_index, widget.article.sentences[_index].english);
       if (generation != _generation || !mounted) return;
       if (_index < widget.article.sentences.length - 1) {
         setState(() => _index++);
+        _publish();
       } else {
         setState(() => _playing = false);
+        _publish();
         return;
       }
     }
@@ -159,12 +207,20 @@ class _ListenScreenState extends State<ListenScreen> {
       _generation++;
       await widget.player.pause();
       if (mounted) setState(() => _playing = false);
+      _publish();
       return;
     }
     // Resuming speaks this sentence again from its start, because no engine on
     // every platform can continue mid-word. Said on screen rather than hidden.
-    setState(() => _playing = true);
-    await widget.player.resume();
+    //
+    // It goes through _playCurrent and deliberately NOT through
+    // `player.resume()`. Once the article had finished, the player had already
+    // been stopped and its current text cleared, so `resume()` returned on its
+    // first line: the button flipped to a pause icon, the ticks sat still, and
+    // no sound came out. Restarting the sentence is both what the screen
+    // promises and the only thing that actually plays.
+    _generation++;
+    await _playCurrent();
   }
 
   Future<void> _jump(int delta) async {
@@ -186,7 +242,11 @@ class _ListenScreenState extends State<ListenScreen> {
     }
   }
 
-  ListenSize get _size => widget.onSize == null ? widget.size : widget.size;
+  /// The size the sentence is drawn at. The parent owns it when it hands down an
+  /// `onSize`; otherwise this screen is the owner and [ListenSize.large] is the
+  /// starting point. The ternary that used to be here returned `widget.size` on
+  /// both branches, which is a decision that reads as one and is not.
+  ListenSize get _size => widget.size;
 
   @override
   Widget build(BuildContext context) {

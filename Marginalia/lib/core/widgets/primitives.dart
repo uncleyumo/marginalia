@@ -335,6 +335,7 @@ class AppSheet extends StatelessWidget {
     Widget? trailing,
     bool locked = false,
     String? lockMessage,
+    String? closeLabel,
     bool useSafeArea = true,
   }) {
     return showModalBottomSheet<T>(
@@ -350,6 +351,7 @@ class AppSheet extends StatelessWidget {
         trailing: trailing,
         locked: locked,
         lockMessage: lockMessage,
+        closeLabel: closeLabel,
         onClose: () => Navigator.of(ctx).maybePop(),
         builder: builder,
       ),
@@ -380,6 +382,7 @@ class AppSheetFrame extends StatelessWidget {
     this.leading,
     this.locked = false,
     this.lockMessage,
+    this.closeLabel,
     this.onClose,
   });
 
@@ -389,6 +392,16 @@ class AppSheetFrame extends StatelessWidget {
   final Widget? leading;
   final bool locked;
   final String? lockMessage;
+
+  /// What the frame's one Close says. `Close` is right for a sheet that asked a
+  /// question; a sheet that only TOLD the reader something is dismissed by
+  /// acknowledging it, and `Got it` is the honest label there.
+  ///
+  /// It exists so that a sheet never adds a second dismiss button of its own to
+  /// say the same thing in different words. Two controls for one action is the
+  /// bug this frame was built to prevent.
+  final String? closeLabel;
+
   final VoidCallback? onClose;
 
   @override
@@ -484,8 +497,9 @@ class AppSheetFrame extends StatelessWidget {
   /// on a back gesture and on a tap outside, so this is the third way in, not
   /// the only one, and it should not shout about it.
   Widget _close(BuildContext context, Palette c) {
-    final String label =
-        locked ? (lockMessage ?? 'Choose an option first') : 'Close';
+    final String label = locked
+        ? (lockMessage ?? 'Choose an option first')
+        : (closeLabel ?? 'Close');
     return Padding(
       padding: EdgeInsets.fromLTRB(
         Gap.sheetPad,

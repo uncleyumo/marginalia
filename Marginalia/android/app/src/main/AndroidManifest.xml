@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- Writing an article and fetching a recorded voice are the only two
          network calls this app makes, and both are optional. The permission
          lives in MAIN, not in the debug and profile manifests: those two already
@@ -6,6 +7,19 @@
          build of the same code had no permission at all and every request failed
          with a SecurityException. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Listening with the screen off is DESIGN's use case #2, and it is the
+         reason audio_service is a dependency at all. Without a foreground
+         service Android suspends the process the moment the screen goes dark,
+         so the article stopped mid-sentence as soon as the reader put the phone
+         in a pocket — which is the one moment the Listen tab exists for.
+
+         MEDIA_PLAYBACK is a separate permission from API 34 onward, and a
+         service that declares the type without holding it is killed on start. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
     <application
         android:label="marginalia"
         android:name="${applicationName}"
@@ -32,21 +46,61 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!-- The foreground service that keeps a sentence playing with the screen
+             off, and the MediaSession the lock screen and the headset buttons
+             talk to. `tools:ignore="Instantiatable"` because the classes live in
+             the audio_service plugin, not here; the linter cannot see them. -->
+        <service
+            android:name="com.ryanheise.audioservice.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="true"
+            tools:ignore="Instantiatable">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService"/>
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+            android:exported="true"
+            tools:ignore="Instantiatable">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON"/>
+            </intent-filter>
+        </receiver>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
-    <!-- Required to query activities that can process text, see:
-         https://developer.android.com/training/package-visibility and
-         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
 
-         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <!-- Package visibility. From Android 11 an app cannot see components of
+         other apps unless it says which ones it wants, and both of these are
+         silent failures rather than errors:
+
+           · TTS_SERVICE — without it `flutter_tts` cannot find the phone's
+             speech engine, so EVERY device-voice path (every word's Say it, and
+             every sentence on a phone with no MiMo key) produced nothing at all
+             while the play button looked alive. This was the real cause of
+             "the listening does not work".
+           · MediaBrowserService — without it the lock screen cannot connect to
+             the transport above.
+
+         PROCESS_TEXT is what the Flutter engine itself needs for the text
+         selection toolbar. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
+        </intent>
+        <intent>
+            <action android:name="android.media.browse.MediaBrowserService"/>
         </intent>
     </queries>
 </manifest>

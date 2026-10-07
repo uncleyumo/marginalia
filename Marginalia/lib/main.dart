@@ -11,6 +11,7 @@
 
 import 'dart:async';
 
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show SystemChrome, SystemNavigator, SystemUiOverlayStyle;
@@ -22,6 +23,7 @@ import 'core/widgets/texture.dart';
 import 'data/audio.dart';
 import 'data/database.dart' hide WordRow;
 import 'data/dictionary.dart';
+import 'data/handler.dart';
 import 'data/keystore.dart';
 import 'data/remote/api.dart';
 import 'data/repository.dart';
@@ -41,7 +43,7 @@ import 'features/queue/queue_card.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/words/words_screen.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -50,11 +52,42 @@ void main() {
       statusBarBrightness: Brightness.dark,
     ),
   );
-  runApp(const MarginaliaApp());
+
+  // The lock-screen transport, started before the first frame because
+  // `AudioService.init` is what registers the foreground service — and a service
+  // registered late is a sentence that stops the moment the screen goes dark.
+  //
+  // A failure here is not fatal and must not be. The Listen tab works perfectly
+  // in the foreground; an app that refused to open because a notification could
+  // not be arranged would be a worse app than one that plays without one.
+  MarginaliaAudioHandler? handler;
+  try {
+    handler = await AudioService.init(
+      builder: MarginaliaAudioHandler.new,
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'com.marginalia.reader.listening',
+        androidNotificationChannelName: 'Listening',
+        // Ongoing while playing, so Android does not treat the notification as
+        // dismissible and take the foreground service down with it.
+        androidNotificationOngoing: true,
+        // Paused means paused: leave the foreground rather than hold the phone
+        // awake for a sentence nobody is hearing.
+        androidStopForegroundOnPause: true,
+      ),
+    );
+  } catch (e) {
+    debugPrint('lock-screen transport unavailable: $e');
+  }
+
+  runApp(MarginaliaApp(audioHandler: handler));
 }
 
 class MarginaliaApp extends StatefulWidget {
-  const MarginaliaApp({super.key});
+  const MarginaliaApp({super.key, this.audioHandler});
+
+  /// Handed straight down to the Listen screen, which is the only thing in the
+  /// app that plays a whole article.
+  final MarginaliaAudioHandler? audioHandler;
 
   @override
   State<MarginaliaApp> createState() => _MarginaliaAppState();
@@ -75,6 +108,7 @@ class _MarginaliaAppState extends State<MarginaliaApp> {
       theme: MarginaliaTheme.themeFor(_palette),
       home: _Shell(
         palette: _palette,
+        audioHandler: widget.audioHandler,
         onTogglePalette: () => setState(() {
           _palette = _palette == Palette.warmPaper
               ? Palette.warmInk
@@ -86,10 +120,15 @@ class _MarginaliaAppState extends State<MarginaliaApp> {
 }
 
 class _Shell extends StatefulWidget {
-  const _Shell({required this.palette, required this.onTogglePalette});
+  const _Shell({
+    required this.palette,
+    required this.onTogglePalette,
+    this.audioHandler,
+  });
 
   final Palette palette;
   final VoidCallback onTogglePalette;
+  final MarginaliaAudioHandler? audioHandler;
 
   @override
   State<_Shell> createState() => _ShellState();
@@ -123,7 +162,16 @@ class _ShellState extends State<_Shell> {
   /// Pushed screens, so Back returns rather than jumping to the root. A bare
   /// switchboard would drop the reading position; a full router is more than four
   /// destinations need right now.
-  final List<Widget> _stack = <Widget>[];
+  ///
+  /// These are BUILDERS, not built widgets, and that is not a style choice.
+  /// Holding a constructed widget meant `build()` returned the same instance on
+  /// every rebuild, so Flutter's `canUpdate` saw an identical widget and skipped
+  /// the subtree entirely: the Settings panes were built once and never again.
+  /// Saving a key wrote it to the keystore, rebuilt the shell, and the pane went
+  /// on showing "not set" — which is exactly why MiMo looked impossible to
+  /// configure. A builder is rebuilt on every frame the shell rebuilds, so what
+  /// is on screen always comes from the state that is actually current.
+  final List<Widget Function()> _stack = <Widget Function()>[];
 
   int _planCounter = 0;
   bool _booted = false;
@@ -279,11 +327,16 @@ class _ShellState extends State<_Shell> {
 
     final (bool hasWriter, bool hasVoice) = await _keys.status();
     final String? voiceKey = await _keys.voice();
+    // These two flags are what the Settings hub and its Test buttons read. They
+    // were read from the keystore here and then dropped on the floor, so a
+    // reader who had saved a key was still told they had not.
 
     final WriterEndpoint endpoint = WriterEndpoint.byId(wid ?? 'deepseek');
 
     if (!mounted) return;
     setState(() {
+      _hasWriterKey = hasWriter;
+      _hasVoiceKey = hasVoice;
       _readSize = ReadSize.values.firstWhere(
         (ReadSize r) => r.label == size,
         orElse: () => ReadSize.medium,
@@ -416,7 +469,7 @@ class _ShellState extends State<_Shell> {
     );
   }
 
-  void _push(Widget screen) => setState(() => _stack.add(screen));
+  void _push(Widget Function() screen) => setState(() => _stack.add(screen));
 
   void _pop() {
     if (_stack.isEmpty) return;
@@ -428,7 +481,8 @@ class _ShellState extends State<_Shell> {
   ///
   /// It is not a gate: the app is fully usable with neither key, so the notice
   /// says exactly that and offers a button rather than demanding an answer. Two
-  /// buttons, no third: `Set up now` and `Not now`.
+  /// buttons, no third: `Set up now` and `Got it` — and the second one is the
+  /// sheet frame's own Close under a truer name, not a second control beside it.
   Future<void> _maybeShowSetupNotice() async {
     final (bool hasWriter, bool hasVoice) = await _keys.status();
     if (!mounted || _noticeShown) return;
@@ -447,6 +501,11 @@ class _ShellState extends State<_Shell> {
     await AppSheet.show<void>(
       context,
       title: 'Two things are not set up',
+      // The frame owns the one dismiss control; naming it here is what keeps
+      // this sheet to two buttons instead of three. A body that added its own
+      // "Got it" beside the frame's "Close" would be two controls for one
+      // action — the exact thing this sheet was reported for.
+      closeLabel: 'Got it',
       builder: (BuildContext ctx) => Padding(
         padding: const EdgeInsets.fromLTRB(Gap.sheetPad, 0, Gap.sheetPad, 6),
         child: Column(
@@ -488,14 +547,8 @@ class _ShellState extends State<_Shell> {
               label: 'Set up now',
               onPressed: () {
                 Navigator.of(ctx).pop();
-                _push(_settings());
+                _push(_settings);
               },
-            ),
-            const SizedBox(height: 8),
-            Btn(
-              label: 'Not now',
-              primary: false,
-              onPressed: () => Navigator.of(ctx).pop(),
             ),
           ],
         ),
@@ -642,7 +695,7 @@ class _ShellState extends State<_Shell> {
         // Nothing left to go back to: leave.
         SystemNavigator.pop();
       },
-      child: _stack.isNotEmpty ? _stack.last : _root(),
+      child: _stack.isNotEmpty ? _stack.last() : _root(),
     );
   }
 
@@ -762,7 +815,7 @@ class _ShellState extends State<_Shell> {
               shape: CircleBorder(
                   side: BorderSide(color: context.colors.hair)),
               child: InkWell(
-                onTap: () => _push(_settings()),
+                onTap: () => _push(_settings),
                 customBorder: const CircleBorder(),
                 child: SizedBox(
                   width: 34,
@@ -1075,7 +1128,7 @@ class _ShellState extends State<_Shell> {
     final String? key = await _keys.writer();
     if (key == null || key.trim().isEmpty) {
       Toast.show(context, 'no writer key is saved — nothing was spent');
-      _push(_settings());
+      _push(_settings);
       return;
     }
 
@@ -1188,6 +1241,7 @@ class _ShellState extends State<_Shell> {
       onBack: _leaveArticle,
       hasAudio: _audio.hasRecordedAudio,
       voiceLabel: _audio.source.label,
+      audioHandler: widget.audioHandler,
       size: _listenSize,
       onSize: (ListenSize s) {
         setState(() => _listenSize = s);
@@ -1692,7 +1746,11 @@ class _ShellState extends State<_Shell> {
       },
       onWriterKeyChanged: (String key) async {
         await _keys.saveWriter(key);
-        if (mounted) setState(() {});
+        if (!mounted) return;
+        // The hub row and the Test button both read this flag. Not setting it is
+        // why a saved key still showed as "not set" and Test stayed disabled:
+        // the reader saved a key and the screen said they had not.
+        setState(() => _hasWriterKey = key.trim().isNotEmpty);
         Toast.show(context, 'saved on this phone');
       },
       onVoiceSelected: (String source) {

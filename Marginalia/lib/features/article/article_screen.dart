@@ -129,9 +129,11 @@ class _ArticleScreenState extends State<ArticleScreen> {
   /// line is long-pressed for sound, which also marks it while it speaks.
   final Set<int> _opened = <int>{};
 
-  ReadSize get _size => widget.onReadSize == null
-      ? widget.readSize
-      : widget.readSize;
+  /// The size the article is set at. The parent owns it when it hands down an
+  /// `onReadSize`; otherwise this screen is the owner and `readSize` is the
+  /// starting point. The ternary that used to be here returned the same field on
+  /// both branches, so it read as a decision and made none.
+  ReadSize get _size => widget.readSize;
 
   void _toggleAll() => setState(() {
         _showAllChinese = !_showAllChinese;

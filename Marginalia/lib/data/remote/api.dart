@@ -41,7 +41,6 @@ class WriterEndpoint {
     required this.baseUrl,
     required this.model,
     required this.costLine,
-    this.byKeyHeader = false,
   });
 
   final String id;
@@ -52,11 +51,6 @@ class WriterEndpoint {
   /// Shown on the card BEFORE anything is spent. A price that appears after the
   /// call is an invoice, not a price.
   final String costLine;
-
-  /// MiMo documents both `Authorization: Bearer` and `api-key`. Sending the
-  /// bearer form works for all three providers, so this flag exists only to say
-  /// that the alternative is available, not because it is needed.
-  final bool byKeyHeader;
 
   static const WriterEndpoint deepseek = WriterEndpoint(
     id: 'deepseek',
@@ -74,12 +68,15 @@ class WriterEndpoint {
     costLine: 'gpt-4o-mini · ~\$0.01 an article',
   );
 
+  // `mimo-v2.5` is withdrawn on 2026-10-21, and a withdrawn model id is a 404
+  // rather than a warning. v2.6-flash is the current replacement on the same
+  // endpoint and the same request shape; nothing else here changes.
   static const WriterEndpoint mimo = WriterEndpoint(
     id: 'mimo',
     name: 'Xiaomi MiMo',
     baseUrl: 'https://api.xiaomimimo.com/v1',
-    model: 'mimo-v2.5',
-    costLine: 'mimo-v2.5 · ~\$0.001 an article',
+    model: 'mimo-v2.6-flash',
+    costLine: 'mimo-v2.6-flash · ~\$0.001 an article',
   );
 
   static const List<WriterEndpoint> all = <WriterEndpoint>[
@@ -122,12 +119,16 @@ class VoiceEndpoint {
     baseUrl: 'https://api.xiaomimimo.com/v1',
     model: 'mimo-v2.5-tts',
     costLine: 'reads the article aloud in a recorded voice · online · free',
+    // The five the API actually answers to. `audio.voice` takes an ID, not a
+    // name, and this list used to carry the four Chinese voices as TRANSLATED
+    // names — `Ice Sugar`, `Jasmine`, `Soda`, `Birch` for 冰糖, 茉莉, 苏打, 白桦.
+    // Those strings are not IDs, so picking one produced a rejected request and
+    // a voice that could not be configured, which is the shape the bug report
+    // had. They are also the wrong tool for this app: the articles are English
+    // and DESIGN pins the voice to en-US, so a zh-CN voice has nothing to read
+    // here. Removed rather than repaired.
     voices: <String>[
       'mimo_default',
-      'Ice Sugar',
-      'Jasmine',
-      'Soda',
-      'Birch',
       'Mia',
       'Chloe',
       'Milo',

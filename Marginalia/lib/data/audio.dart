@@ -92,17 +92,37 @@ class SentenceAudio implements SentencePlayer {
   SentenceAudio({FlutterTts? tts, ja.AudioPlayer? player, RemoteApi? api})
       : _tts = tts ?? FlutterTts(),
         _player = player ?? ja.AudioPlayer(),
-        _api = api ?? RemoteApi() {
-    _configureTts();
-  }
+        _api = api ?? RemoteApi();
 
   final FlutterTts _tts;
   final ja.AudioPlayer _player;
   final RemoteApi _api;
 
+  /// The one-time engine setup, awaited before the first word is spoken.
+  ///
+  /// It used to be fired and forgotten from the constructor body, so
+  /// `setLanguage('en-US')` and `awaitSpeakCompletion(true)` raced the first
+  /// `speak()` — a sentence could come out in the phone's default language, or
+  /// the completion callback could arrive too late and the next sentence start
+  /// on top of it. A `late final` future is the whole fix: every path that
+  /// speaks awaits it first, and it still runs exactly once.
+  late final Future<void> _ttsReady = _configureTts();
+
   Completer<void>? _current;
   String _currentText = '';
-  VoiceSource _source = VoiceSource.device;
+
+  /// What the reader CHOSE. Only [configure] writes this.
+  VoiceSource _configured = VoiceSource.device;
+
+  /// What actually spoke last.
+  ///
+  /// A recording that fails falls through to the device engine, and the Listen
+  /// screen has to label what the reader is actually hearing — so this moves on
+  /// its own. The previous version wrote the fallback into the configured field
+  /// instead, so ONE dropped request turned MiMo off permanently for the rest of
+  /// the session and the label never went back.
+  VoiceSource _lastSpoken = VoiceSource.device;
+
   DeviceVoice _device = const DeviceVoice(
       available: true, note: 'this phone has an English voice installed');
 
@@ -114,17 +134,15 @@ class SentenceAudio implements SentencePlayer {
   @override
   bool get isPlaying => _current != null;
 
+  /// What is speaking, not what was asked for. The two differ exactly when a
+  /// recording failed, and that is the moment the reader most needs the truth.
   @override
-  VoiceSource get source => _source;
+  VoiceSource get source => _lastSpoken;
 
   @override
-  bool get hasRecordedAudio => _source == VoiceSource.recorded;
+  bool get hasRecordedAudio => _configured == VoiceSource.recorded;
 
   DeviceVoice get deviceVoice => _device;
-
-  String get voiceName => _voice;
-
-  String get baseUrl => _baseUrl;
 
   /// Point the player at an engine. Called at boot and whenever Settings
   /// changes, so neither screen has to know how the other one was configured.
@@ -134,7 +152,10 @@ class SentenceAudio implements SentencePlayer {
     String baseUrl = '',
     String voice = '',
   }) {
-    _source = source;
+    _configured = source;
+    // Optimistic until proven otherwise: the label should name the engine the
+    // reader asked for until one actually fails to answer.
+    _lastSpoken = source;
     _apiKey = apiKey.trim();
     if (baseUrl.trim().isNotEmpty) _baseUrl = baseUrl.trim();
     if (voice.trim().isNotEmpty) _voice = voice.trim();
@@ -195,6 +216,9 @@ class SentenceAudio implements SentencePlayer {
   Future<bool> speakWord(String word, {double rate = 0.42}) async {
     await stop();
     try {
+      // The language and the completion flag must be set before the first word,
+      // not concurrently with it.
+      await _ttsReady;
       await _tts.setSpeechRate(rate);
       await _tts.speak(word);
       await _tts.setSpeechRate(0.44);
@@ -227,16 +251,19 @@ class SentenceAudio implements SentencePlayer {
 
     // A recorded voice, when one is configured and one can be had. Any failure
     // at all falls THROUGH to the device engine rather than leaving a gap.
-    if (_source == VoiceSource.recorded && _apiKey.isNotEmpty) {
+    if (_configured == VoiceSource.recorded && _apiKey.isNotEmpty) {
       final String? path = await _cachedRecording(text);
       if (path != null) {
         final bool played = await _playFile(path);
         if (played) {
+          _lastSpoken = VoiceSource.recorded;
           _finish(done);
           return;
         }
-        // The recording was useless. Say it with the phone's own voice instead.
-        _source = VoiceSource.device;
+        // The recording was useless. Say it with the phone's own voice instead,
+        // and label it that way — without un-configuring MiMo, which is a
+        // decision only the reader gets to make.
+        _lastSpoken = VoiceSource.device;
       }
     }
 
@@ -252,6 +279,9 @@ class SentenceAudio implements SentencePlayer {
   Future<void> _speak(Completer<void> done, String text) async {
     try {
       await _ensureSession();
+      await _ttsReady;
+      // Whichever route got here, this is the phone speaking.
+      _lastSpoken = VoiceSource.device;
       await _tts.speak(text);
     } catch (e) {
       debugPrint('tts speak failed: $e');
@@ -351,15 +381,15 @@ class SentenceAudio implements SentencePlayer {
       // Stopping something that is not speaking is not an error.
     }
     // `PlayerState` is a CLASS in just_audio 0.10, not an enum — `idle` lives on
-      // `ProcessingState`. Checking the wrong one is a compile error rather than
-      // a silent wrong answer, which is the good kind of version difference.
-      try {
-        if (_player.processingState != ja.ProcessingState.idle) {
-          await _player.stop();
-        }
-      } catch (_) {
-        // Nothing loaded, so nothing to stop.
+    // `ProcessingState`. Checking the wrong one is a compile error rather than a
+    // silent wrong answer, which is the good kind of version difference.
+    try {
+      if (_player.processingState != ja.ProcessingState.idle) {
+        await _player.stop();
       }
+    } catch (_) {
+      // Nothing loaded, so nothing to stop.
+    }
     if (c != null && !c.isCompleted) c.complete();
   }
 
@@ -378,13 +408,25 @@ class SentenceAudio implements SentencePlayer {
   }
 
   @override
+  /// Re-speak the current sentence from its start.
+  ///
+  /// There is no portable mid-word resume, so this is what "resume" means here —
+  /// and the Listen screen says so. It is deliberately NOT the Listen screen's
+  /// play button: after the last sentence, [stop] has cleared the text, so this
+  /// returns immediately and a button wired to it would look alive and do
+  /// nothing. The screen restarts the sentence through [play] instead.
   Future<void> resume() async {
     if (_currentText.isEmpty) return;
-    if (_source == VoiceSource.recorded && _apiKey.isNotEmpty) {
+    if (_configured == VoiceSource.recorded && _apiKey.isNotEmpty) {
       final String? path = await _cachedRecording(_currentText);
-      if (path != null && await _playFile(path)) return;
+      if (path != null && await _playFile(path)) {
+        _lastSpoken = VoiceSource.recorded;
+        return;
+      }
     }
     try {
+      await _ttsReady;
+      _lastSpoken = VoiceSource.device;
       await _tts.speak(_currentText);
     } catch (_) {
       // Nothing left to try; the sentence stays visible on screen.

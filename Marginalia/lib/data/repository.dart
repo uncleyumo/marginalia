@@ -612,8 +612,6 @@ class LibraryRepository {
   /// The plan's list fields are stored as json text. A real table would let the
   /// two drift apart, and a plan whose `avoid` list is half-migrated is a plan
   /// that silently stops protecting the reader.
-  // ignore: unused_element — used by the plan repository, which lands with the
-  // Settings panes; kept here so the encoding has one definition.
   static List<String> _decodeList(String raw) {
     try {
       final Object? v = jsonDecode(raw);

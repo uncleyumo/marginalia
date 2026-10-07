@@ -1,0 +1,116 @@
+name: marginalia
+description: "No-Stop English — 三篇文章永远在等你。离线优先的英语阅读器。"
+publish_to: "none"
+
+# The version is deliberately not a release train. Design v9 §4e.
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ── state ────────────────────────────────────────────────────────────────
+  # The design leans on DERIVED data: the shelf is a merge of the ledger and
+  # the live queue; word weight decays daily; the hub row restates whatever
+  # the panes hold. Provider composition expresses "computed from that" far
+  # more directly than a hand-written event stream would.
+  # Left as a caret range on purpose: 3.x changed the Notifier/AsyncNotifier
+  # surface, and `pub get` should land on whatever the SDK resolves to rather
+  # than on a pin that quietly blocks a security release.
+  flutter_riverpod: ^3.0.0
+
+  # ── routing ──────────────────────────────────────────────────────────────
+  # Settings is four panes inside one screen, and an article reopened from the
+  # library must arrive with a banner and a retargeted Back button. Nested
+  # routes and route parameters carry that context; a string switchboard would
+  # grow a side channel for it.
+  go_router: ^16.0.0
+
+  # ── models ───────────────────────────────────────────────────────────────
+  # The reading plan is seven named fields and has to be diffable field by
+  # field, so the model must be a value type with copyWith and structural ==.
+  freezed_annotation: ^3.0.0
+  json_annotation: ^4.9.0
+
+  # ── local storage ────────────────────────────────────────────────────────
+  # Most-revisited and the calendar numbers are GROUP BY queries over one
+  # table of (day, article, reads, listens). Storing those as a second summary
+  # is exactly the "second copy of the truth" the prototype warns against.
+  drift: ^2.28.0
+  sqlite3_flutter_libs: ^0.5.30
+  path: ^1.9.0
+  path_provider: ^2.1.5
+
+  # ── network ──────────────────────────────────────────────────────────────
+  # Exactly one request shape exists: POST {base}/responses, plus MiMo's
+  # POST {base}/chat/completions. That is a plain client and a thin wrapper —
+  # an interceptor stack would be machinery without a job.
+  http: ^1.2.2
+
+  # ── secrets ──────────────────────────────────────────────────────────────
+  # DESIGN §11: keys live in the Android Keystore and only ever go to the base
+  # URL the user typed.
+  flutter_secure_storage: ^10.0.0
+
+  # ── audio ────────────────────────────────────────────────────────────────
+  # just_audio plays the per-sentence wavs; audio_service is what puts play /
+  # pause / next on the lock screen, which is use case #2 (commuting, screen
+  # off, phone in a bag) and therefore not optional.
+  just_audio: ^0.10.0
+  audio_service: ^0.18.18
+  audio_session: ^0.2.2
+
+  # ── speech ───────────────────────────────────────────────────────────────
+  # ECDICT ships no audio column, so the phone's own engine is the only route
+  # to a free, offline, airplane-mode pronunciation for a single word.
+  flutter_tts: ^4.2.0
+
+  # ── misc ─────────────────────────────────────────────────────────────────
+  intl: ^0.19.0
+  collection: ^1.18.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.7.0
+  drift_dev: ^2.28.0
+  freezed: ^3.0.0
+  json_serializable: ^6.11.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    # A first-run app with no keys must still work: device TTS + these
+    # articles + the bundled dictionary = $0.00 and no empty screen.
+    - assets/sample/
+    # The dictionary ships COMPRESSED on purpose. dictionary.json is 38.9 MB
+    # unpacked; bundling it raw would add 39 MB to the APK for no benefit. The
+    # app inflates it once into its private directory on first launch and reads
+    # it from there. 392,695 entries, 10.42 MB in the APK.
+    - assets/dict/dictionary.zip
+
+  fonts:
+    # Serif for anything READ. Optical size axis kept as a variable font.
+    - family: Newsreader
+      fonts:
+        - asset: assets/fonts/Newsreader.ttf
+        - asset: assets/fonts/Newsreader-Italic.ttf
+          style: italic
+    # Grotesque for anything OPERATED.
+    - family: SchibstedGrotesk
+      fonts:
+        - asset: assets/fonts/SchibstedGrotesk.ttf
+    # Mono for data: IPA, timestamps, API keys, counters. DESIGN §9 — in a data
+    # view the label is mono and the value is serif, so the eye can tell what
+    # KIND of thing this is from what it SAYS, without reading either.
+    - family: IBMPlexMono
+      fonts:
+        - asset: assets/fonts/IBMPlexMono-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/IBMPlexMono-Medium.ttf
+          weight: 500

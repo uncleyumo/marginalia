@@ -1,0 +1,14 @@
+# Secrets. settings.local.json holds a live ANTHROPIC_AUTH_TOKEN; it must never
+# be committed, and it is listed first so it is the first thing a reader sees.
+.claude/settings.local.json
+
+# Build and tool output. Marginalia/.gitignore covers these inside the Flutter
+# project; these lines cover the same names at the repository root, where the
+# .bat helpers and the doctor logs live.
+build/
+.dart_tool/
+*.log
+
+# OS noise
+Thumbs.db
+desktop.ini

@@ -1,0 +1,85 @@
+{
+  "_comment": "Sample article. Its job is to make the first launch honest: a fresh install with no API key must still have something to read, hear, and tap. Structure mirrors the real writer's output (DESIGN §10) so swapping in a written article is a file swap, not a migration. Marked words are a tier, never a verdict — 'unfamiliar' gets the vermilion pencil rule, 'difficult' gets the jade one. There is no 'known'.",
+  "id": "a-sample-pointers",
+  "title": "What a Pointer Really Is",
+  "topic": "C language",
+  "focus": "the one-line mental model",
+  "wordCount": 312,
+  "minuteEstimate": 4,
+  "audioPath": null,
+  "sentences": [
+    {
+      "en": "Most beginners meet pointers in the second week of C, and most beginners hate them.",
+      "cn": "大多数初学者在学习 C 的第二周就会遇到指针，而且大多数初学者都讨厌它们。",
+      "audio": null
+    },
+    {
+      "en": "That is fair, because the word arrives before the idea behind it.",
+      "cn": "这种感觉很合理，因为这个词比它背后的概念先到。",
+      "audio": null
+    },
+    {
+      "en": "A pointer is just a variable that stores an address.",
+      "cn": "指针只是一个存放地址的变量。",
+      "audio": null
+    },
+    {
+      "en": "An address is a number that says where a value lives in memory.",
+      "cn": "地址是一个数字，它说明某个值存放在内存的哪里。",
+      "audio": null
+    },
+    {
+      "en": "When you write int x = 5, the compiler reserves a small block of memory and puts 5 inside it.",
+      "cn": "当你写下 int x = 5 时，编译器会预留一小块内存，并把 5 放进去。",
+      "audio": null
+    },
+    {
+      "en": "To read the value, you dereference the pointer, and the star gives you 5 back.",
+      "cn": "要读取那个值，你对指针解引用，星号就把 5 还给你。",
+      "audio": null
+    },
+    {
+      "en": "If you dereference a pointer that was never set, your program crashes with a segmentation fault.",
+      "cn": "如果你解引用一个从未设置过的指针，程序会崩溃，并抛出一个段错误。",
+      "audio": null
+    },
+    {
+      "en": "You can also allocate memory yourself, because malloc asks the heap for a block.",
+      "cn": "你也可以自己分配内存，因为 malloc 是向堆申请一块空间。",
+      "audio": null
+    },
+    {
+      "en": "Forget free and the memory leaks, a little on every loop, until the program runs out.",
+      "cn": "忘掉 free，内存就会泄漏，每次循环漏一点，直到程序用光为止。",
+      "audio": null
+    },
+    {
+      "en": "None of this is clever. It is a book-keeping habit, and the compiler follows it exactly.",
+      "cn": "这些都不算聪明。它只是一个记账习惯，而编译器会严格照做。",
+      "audio": null
+    },
+    {
+      "en": "Read the value through the pointer and you will never mix the two up again.",
+      "cn": "透过指针读取那个值，你就再也不会把这两者搞混了。",
+      "audio": null
+    }
+  ],
+  "marks": [
+    {"surface": "pointers", "lemma": "pointer", "sentence": 0, "tier": "unfamiliar"},
+    {"surface": "beginners", "lemma": "beginner", "sentence": 0, "tier": "learned"},
+    {"surface": "hate", "lemma": "hate", "sentence": 0, "tier": "learned"},
+    {"surface": "pointers", "lemma": "pointer", "sentence": 0, "tier": "unfamiliar"},
+    {"surface": "address", "lemma": "address", "sentence": 3, "tier": "unfamiliar"},
+    {"surface": "memory", "lemma": "memory", "sentence": 3, "tier": "learned"},
+    {"surface": "reserves", "lemma": "reserve", "sentence": 4, "tier": "learned"},
+    {"surface": "block", "lemma": "block", "sentence": 4, "tier": "learned"},
+    {"surface": "dereference", "lemma": "dereference", "sentence": 5, "tier": "unfamiliar"},
+    {"surface": "set", "lemma": "set", "sentence": 6, "tier": "learned"},
+    {"surface": "crashes", "lemma": "crash", "sentence": 6, "tier": "unfamiliar"},
+    {"surface": "segmentation", "lemma": "segmentation", "sentence": 6, "tier": "unfamiliar"},
+    {"surface": "allocate", "lemma": "allocate", "sentence": 7, "tier": "unfamiliar"},
+    {"surface": "heap", "lemma": "heap", "sentence": 7, "tier": "unfamiliar"},
+    {"surface": "leaks", "lemma": "leak", "sentence": 8, "tier": "unfamiliar"},
+    {"surface": "forget", "lemma": "forget", "sentence": 8, "tier": "learned"}
+  ]
+}

@@ -1,0 +1,66 @@
+include: package:flutter_lints/flutter.yaml
+
+# The design system is declared at the app level, not on a subtree. DESIGN §12
+# records what happened when it wasn't: a token scoped to one widget's ancestor
+# resolved to nothing elsewhere and rendered transparent. A token that only
+# exists inside a feature folder is the same mistake with a different name, so
+# importing a design token from outside lib/core/design/ is an error here.
+analyzer:
+  errors:
+    # ── design-system discipline ───────────────────────────────────────────
+    # Colour, spacing and type live in lib/core/design/tokens.dart. Hard-coded
+    # hex in a feature is how a palette drifts into two truths.
+    avoid_dynamic_calls: warning
+    prefer_const_constructors: warning
+    prefer_const_constructors_in_immutables: warning
+    prefer_const_declarations: warning
+    prefer_const_literals_to_create_immutables: warning
+
+    # ── correctness ───────────────────────────────────────────────────────
+    # FL-002: a BuildContext used after an await must be re-checked. This app
+    # awaits a lot — network writes, file IO, TTS — and the rule is cheap.
+    use_build_context_synchronously: warning
+    # An async gap where the widget may be gone is exactly the "counts are not
+    # storage" class of bug: the write lands on a dead node and is lost.
+    discarded_futures: warning
+
+    # ── style ─────────────────────────────────────────────────────────────
+    always_declare_return_types: warning
+    prefer_single_quotes: warning
+    unawaited_futures: warning
+
+linter:
+  rules:
+    # ── add ───────────────────────────────────────────────────────────────
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    avoid_empty_else: true
+    avoid_print: true # FL-001: debugPrint, not print
+    avoid_slow_async_io: true
+    cancel_subscriptions: true
+    close_sinks: true
+    directives_ordering: true
+    omit_local_variable_types: false # explicit types are wanted here
+    prefer_const_constructors: true
+    prefer_const_constructors_in_immutables: true
+    prefer_const_declarations: true
+    prefer_const_literals_to_create_immutables: true
+    prefer_final_locals: true
+    prefer_single_quotes: true
+    sort_child_properties_last: true
+    test_types_in_equals: true
+    throw_in_finally: true
+    unawaited_futures: true
+    unnecessary_await_in_return: true
+    unnecessary_parenthesis: true
+    unnecessary_statements: true
+    use_build_context_synchronously: true
+    use_super_parameters: true
+
+    # ── remove ────────────────────────────────────────────────────────────
+    # A commented-out line is a line the design has not decided yet. The
+    # prototype has no dead code; neither should we.
+    unnecessary_brace_in_string_interps: false
+    # Leading underscores on private members: the codebase uses them, but the
+    # lint is noise for a project this size.
+    library_private_types_in_public_api: false

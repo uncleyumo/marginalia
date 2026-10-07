@@ -1,0 +1,107 @@
+{
+  "_comment": "Copy to settings.json (same folder) and fill in only what you use. Every field is optional — with no file at all the pipeline runs on the on-device engine + offline ECDICT for $0.00. Writer keys may come from the env named in each endpoint's \"env\" field (DEEPSEEK_API_KEY, OPENAI_API_KEY, MIMO_API_KEY, DASHSCOPE_API_KEY). Never commit settings.json.",
+  "writer": {
+    "_comment": "A LIST of access points, not one choice. Every one of them speaks the same shape — POST {base_url}/responses (OpenAI Responses API). Only \"active\" is ever called; switch by changing the index.",
+    "active": 0,
+    "endpoints": [
+      {
+        "name": "deepseek",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "",
+        "model": "deepseek-chat",
+        "env": "DEEPSEEK_API_KEY"
+      },
+      {
+        "name": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "",
+        "model": "gpt-4o-mini",
+        "env": "OPENAI_API_KEY"
+      }
+    ]
+  },
+  "voice": {
+    "_comment": "MiMo is the ONLY online engine — there is no second one to configure and no fallback to pick. Run `python3 tts.py --probe-voices` once: it asks each voice for a single word and records which ones answered, and the article is then read with the first English voice that worked. Set voice_auto=false and voice_pick=\"Mia\" to choose by hand. With no key the build silently produces no article audio; every word still has sound from the phone.",
+    "provider": "mimo",
+    "words": "device",
+    "voice_auto": true,
+    "voice_pick": null,
+    "voice_probe": {},
+    "mimo": {
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "api_key": "",
+      "model": "mimo-v2.5-tts",
+      "voice": "Chloe",
+      "style": "Neutral American newsreader. Unhurried, clear consonants, no drama."
+    }
+  },
+  "queue": {
+    "_comment": "Three SLOTS are always waiting. Each slot is in exactly one of two states: \"planned\" (a spec exists, the article does not, nothing has been spent) or \"ready\" (the article exists). There is NO finished flag and no finished boolean anywhere: each article carries reads and listens counters, and reading NEVER removes it. NOT three per day — three, full stop.",
+    "_cost_rule": "THE COST CEILING: if any slot is \"planned\", the app writes nothing and waits for you to tap Write it. An unplanned call must be impossible. \"Done with it\" therefore installs a PLAN, not an article.",
+    "size": 3,
+    "plan": {
+      "_comment": "STRUCTURED, not a paragraph. Changed in v9: the reading configuration became named fields, because a blob of prose cannot be pointed at, diffed, or rewritten field by field — and the LLM is now allowed to edit it. \"reader\" is the vocabulary ceiling (what may be assumed known); \"avoid\" is the negative space (what to hold back) and is the only field that can stop a fluent-but-wrong draft; \"gloss\" is which words get the plain-language treatment. Every field is optional — an empty one means the app decides.",
+      "reader": "software developer, comfortable with code, new to finance English",
+      "topics": ["C language", "NVDA"],
+      "avoid": [
+        "three paragraphs of background before the point",
+        "explanations of things I already know"
+      ],
+      "style": [
+        "start with the thing itself",
+        "short sentences",
+        "say it once"
+      ],
+      "gloss": [
+        "finance words",
+        "anything where a wrong guess would be embarrassing"
+      ],
+      "length": 300,
+      "marked": 6,
+      "_raw": "The user's own words. Sent VERBATIM to the writer, appended on top of the structured fields, and never dropped — Ask-the-AI edits fields, it does not eat this. Use it for something no field can hold.",
+      "raw": "I read software-dev blogs and I am following NVDA. When a finance word shows up, explain it in plain terms. Keep sentences short. Start with the thing itself, no long build-up."
+    },
+    "plan_hint": "Read before EVERY article is written, so detail here costs nothing per article. Polished by the LLM from Settings > What you read > Ask the AI to change it — same writer, same /responses endpoint, one call, and a diff you must accept.",
+    "slots": [
+      {
+        "mode": "auto",
+        "value": ""
+      },
+      {
+        "mode": "auto",
+        "value": ""
+      },
+      {
+        "mode": "auto",
+        "value": ""
+      }
+    ],
+    "_no_slot_modes": "REMOVED in v8. The Auto / Pinned / One-off slot modes are gone. They duplicated gestures the card already has (topic pill, Change the plan, reroll) and were indexed by position in a queue that is unordered. A card's only state is planned or ready — there is no mode.",
+    "_library": "The queue holds three. The library holds EVERYTHING. 'Done with it' takes a card out of the queue and writes a ledger row; the article stops being a card but never stops existing. The list is DERIVED, not stored: shelf() = LEDGER union QUEUE, keyed by title. There is no library table, so there is no second copy of the truth to fall out of sync. Filters: all / worth reading again (reads>=2) / never read (reads==0) / heard but not read (reads==0 and listens>0) / deleted (gone). Search matches title AND topic. Opening an archived article shows a banner and retargets Back to the library; reads and listens still work.",
+    "_storage": "v9. An article is text (a few KB) plus audio (a few hundred KB); audio is ~95% of it. Files live at files/<YYYY-MM-DD>/<article_id>.{json,wav,words.json} — one folder per day, three files per article, no temp files and no orphans. The offline dictionary (dict/ecdict.db, ~851 MB) is fetched ONCE and shared, never copied per article. Budget ~12 MB of audio ≈ 35 articles; the shelf shows used-of-budget so the ceiling is a number you can plan around.",
+    "_deletion": "v9. THE RULE: counts are not storage. Freeing an article's space removes its text and audio and sets its kb to 0 — and must NEVER touch reads or listens. You read it five times; that happened, and deleting the file does not un-happen it. The row STAYS on the shelf, struck through and tagged 'deleted · text and audio removed', keeps its place among its own kind, and still counts in Most revisited. Guards: a card that is live in the queue cannot be deleted, and a deleted article cannot be opened (it would be an empty page) — it points at 'Write it again' instead, which is one tap, so deletion is reversible at a stated price."
+  },
+  "presets": {
+    "_comment": "The chips offered in the spec sheet, editable by the user. Delete what you never tap, add what you always end up typing. Same list, no nesting — it is used like a list, so it is stored like one.",
+    "topics": [
+      "C language",
+      "NVDA",
+      "Music",
+      "Git",
+      "Reading"
+    ],
+    "focuses": [
+      "why it trips beginners up",
+      "the one-line mental model",
+      "what the machine actually does",
+      "a bug it causes in real code",
+      "the mistake everyone makes once"
+    ],
+    "_focus": "A focus is the lens the topic is written through. Same topic + different focus = a genuinely different article. Regenerate pre-fills a focus this topic has not used yet, so \"write again\" is never a reroll."
+  },
+  "topics": {
+    "_comment": "Kept for the legacy 7-day fixture pipeline (planner.py / build_window.py). The app itself no longer plans by day — see \"queue\" above. Grounding for the writer so it has something real to talk about.",
+    "stock": "NVDA",
+    "music": "indie rock and lo-fi"
+  }
+}

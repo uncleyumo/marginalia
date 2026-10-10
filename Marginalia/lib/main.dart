@@ -1113,7 +1113,10 @@ class _ShellState extends State<_Shell> {
   /// The card's ⋯ menu. Three real actions, matching the prototype's
   /// article menu: a different topic, write it again, done with it.
   Future<void> _slotMenu(BuildContext context, Queue q, int index) async {
-    final QueueSlot slot = q.slots[index];
+    // Hydrated, to match the card: the raw stub has no body, so the menu would
+    // call a written or bundled article 'the text is gone' while the card below
+    // it still offered `Read`.
+    final QueueSlot slot = _hydrated(q.slots[index]);
     final Palette c = context.colors;
 
     await AppSheet.show<void>(
@@ -1424,6 +1427,12 @@ class _ShellState extends State<_Shell> {
   /// Open a ready card. A planned card has nothing to open, so this is never
   /// reached from one.
   void _openArticle(QueueSlot slot, {bool fromLibrary = false}) {
+    // Hydrate FIRST. The queue holds a database stub — an identity and a title,
+    // no body — and the bundled sample's text lives only in `_samples`. The card
+    // already renders a hydrated copy, so it offered `Read` and this function
+    // then bailed on the unhydrated stub: the button looked alive and did
+    // nothing at all. Every caller goes through here, so the fix belongs here.
+    slot = _hydrated(slot);
     // Zeroed before the load lands, so the previous article's numbers are never
     // shown against this one for a frame.
     _readsToday = 0;

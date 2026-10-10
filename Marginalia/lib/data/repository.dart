@@ -13,6 +13,7 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 
+import '../domain/instruction.dart';
 import '../domain/library.dart';
 import '../domain/models.dart';
 import '../domain/plan.dart';
@@ -33,13 +34,22 @@ class LibraryRepository {
   /// Load the queue. If it is short (a first run, or a row lost to a crash),
   /// top it up with FREE plans — never with articles, because writing costs
   /// money and only a tap may do that.
+  ///
+  /// A ready slot is hydrated from `article_rows`, so the card comes back with
+  /// its REAL body: its word count, its reading time, its difficulty and its
+  /// keywords. It used to come back as a stub with `wordCount: 0`, which put
+  /// `0 words · 0 min read` on the card and opened onto an empty screen — the
+  /// database talking to the reader.
   Future<Queue> loadQueue({required QueueSlot Function() planFactory}) async {
     final List<QueueRow> rows = await db.select(db.queueRows).get();
+    final List<ArticleRow> bodies = await db.select(db.articleRows).get();
+    final Map<String, ArticleRow> bodyById = <String, ArticleRow>{
+      for (final ArticleRow a in bodies) a.articleId: a,
+    };
 
-    // The ledger carries the human-facing facts — the real title, the word count,
-    // the minutes. The queue row only knows an identity, and putting that identity
-    // on screen produced a card titled "a-sample-pointers" with "0 words · 0 min
-    // read" under it, which is the database talking to the reader.
+    // The ledger is the fallback for a body that is not there: an article whose
+    // bytes were freed, or one written before bodies were stored. It carries
+    // the human-facing facts — the real title, and now the keywords.
     final List<LedgerRow> ledger = await db.select(db.ledgerRows).get();
     final Map<String, LedgerRow> byId = <String, LedgerRow>{
       for (final LedgerRow l in ledger) l.articleId: l,
@@ -51,30 +61,16 @@ class LibraryRepository {
       final String state = r.state;
       Article? article;
       if (state == 'ready') {
-        // The article body lives in a file; this layer only needs the identity
-        // and the counters, which the ledger already holds.
-        final LedgerRow? meta = byId[r.articleId];
-        article = Article(
-          id: r.articleId,
-          title: meta?.title ?? r.articleId,
-          topic: meta?.topic.isNotEmpty == true ? meta!.topic : r.topic,
-          sentences: const <Sentence>[],
-          marks: const <Mark>[],
-          // Word count and minutes come from the article body, which
-          // main.dart resolves. Storing them here would mean a schema change
-          // and a second copy of a fact that already exists.
-          wordCount: 0,
-          minuteEstimate: 0,
-        );
+        article = _articleOf(r.articleId, bodyById, byId);
       }
       slots.add(QueueSlot(
         articleId: r.articleId,
         state: state == 'ready' ? SlotState.ready : SlotState.planned,
         article: article,
-        topic: r.topic,
-        focus: r.focus,
+        instruction: r.instruction,
+        instructionId: r.instructionId,
         plannedWords: r.plannedWords,
-        plannedMarked: r.plannedMarked,
+        plannedBand: _bandOf(r.plannedBand),
         isWriting: r.isWriting,
       ));
     }
@@ -101,8 +97,8 @@ class LibraryRepository {
     required int index,
     required String articleId,
     required String title,
-    required String topic,
     required int kilobytes,
+    List<String> keywords = const <String>[],
   }) async {
     if (index < 0 || index >= 3) return;
     final QueueRow? row = await (db.select(db.queueRows)
@@ -114,7 +110,11 @@ class LibraryRepository {
         .write(QueueRowsCompanion(
       articleId: Value(articleId),
       state: Value('ready'),
-      topic: Value(topic),
+      // A slot holding an article has no outstanding request. Clearing the
+      // instruction here is what stops a ready card from claiming the reader
+      // asked for something that has already been written.
+      instruction: const Value(''),
+      instructionId: const Value(null),
       isWriting: const Value(false),
     ));
 
@@ -127,7 +127,7 @@ class LibraryRepository {
             LedgerRowsCompanion.insert(
               articleId: articleId,
               title: title,
-              topic: Value(topic),
+              keywords: Value(encodeList(keywords)),
               kilobytes: Value(kilobytes),
             ),
           );
@@ -158,6 +158,17 @@ class LibraryRepository {
   Future<void> markSampleInstalled(String articleId) =>
       setSetting('sample:$articleId', '1');
 
+  /// Read a stored band name back, falling back to `medium`.
+  ///
+  /// A row written by an older build has no band at all, and the column default
+  /// only applies to rows SQLite itself creates — a value that came back empty
+  /// or unrecognised must land on a real band rather than on `null`. Medium is
+  /// the honest fallback: it is the band whose length every old plan carried.
+  static LengthBand _bandOf(String raw) => LengthBand.values.firstWhere(
+        (LengthBand b) => b.name == raw,
+        orElse: () => LengthBand.medium,
+      );
+
   Future<void> _persistSlots(Queue queue) async {
     await db.transaction(() async {
       for (int i = 0; i < queue.slots.length; i++) {
@@ -176,10 +187,10 @@ class LibraryRepository {
                 id: Value(i),
                 articleId: s.articleId,
                 state: s.state.name,
-                topic: Value(s.topic),
-                focus: Value(s.focus),
+                instruction: Value(s.instruction),
+                instructionId: Value(s.instructionId),
                 plannedWords: Value(s.plannedWords),
-                plannedMarked: Value(s.plannedMarked),
+                plannedBand: Value(s.plannedBand.name),
                 isWriting: Value(s.isWriting),
                 position: i,
               ),
@@ -197,7 +208,6 @@ class LibraryRepository {
   Future<void> countRead({
     required String articleId,
     required String title,
-    required String topic,
     required String day,
     required int minutes,
   }) async {
@@ -212,7 +222,6 @@ class LibraryRepository {
               LedgerRowsCompanion.insert(
                 articleId: articleId,
                 title: title,
-                topic: Value(topic),
                 reads: const Value(1),
               ),
             );
@@ -249,6 +258,46 @@ class LibraryRepository {
             ));
       }
     });
+  }
+
+  /// How many times an article has been read: today, and in all.
+  ///
+  /// TWO NUMBERS FROM TWO TABLES, and both are needed:
+  ///
+  ///  · `today` is the one the reader just changed with a tap, so it is what
+  ///    proves the tap landed. Without it the button is a dead control — press
+  ///    it and nothing on the screen moves, which reads as "that did not work"
+  ///    and invites a second press, and a third.
+  ///  · `total` is the article's whole history, which is what makes the line
+  ///    say something true on a day the reader has not counted it yet. Without
+  ///    it, coming back tomorrow looks exactly like never having read it.
+  ///
+  /// Read from `day_log_rows` and `ledger_rows` rather than kept in memory,
+  /// because the whole point is that the number survives leaving the screen.
+  Future<(int today, int total)> readCounts({
+    required String articleId,
+    required String day,
+  }) async {
+    final LedgerRow? meta = await (db.select(db.ledgerRows)
+          ..where(($LedgerRowsTable t) => t.articleId.equals(articleId)))
+        .getSingleOrNull();
+    final drift.DayLogRow? todayRow = await (db.select(db.dayLogRows)
+          ..where(($DayLogRowsTable t) =>
+              t.day.equals(day) & t.articleId.equals(articleId)))
+        .getSingleOrNull();
+    return (todayRow?.reads ?? 0, meta?.reads ?? 0);
+  }
+
+  /// How many times this article has been heard, whole history.
+  ///
+  /// Sits beside [readCounts] rather than inside it: reads and listens are two
+  /// counters on purpose, and a caller that wants both can ask for both. A
+  /// missing row is zero listens, which is the truth and not an error.
+  Future<int> ledgerListens(String articleId) async {
+    final LedgerRow? meta = await (db.select(db.ledgerRows)
+          ..where(($LedgerRowsTable t) => t.articleId.equals(articleId)))
+        .getSingleOrNull();
+    return meta?.listens ?? 0;
   }
 
   /// Count one listen. Deliberately does NOT touch `reads`: hearing an article
@@ -308,26 +357,38 @@ class LibraryRepository {
   Future<void> recordLedger({
     required String articleId,
     required String title,
-    required String topic,
     required int kilobytes,
+    required String day,
+    List<String> keywords = const <String>[],
   }) async {
     final LedgerRow? existing = await (db.select(db.ledgerRows)
           ..where(($LedgerRowsTable t) => t.articleId.equals(articleId)))
         .getSingleOrNull();
     if (existing != null) {
-      if (existing.kilobytes == 0) {
-        await (db.update(db.ledgerRows)
-              ..where(($LedgerRowsTable t) => t.articleId.equals(articleId)))
-            .write(LedgerRowsCompanion(kilobytes: Value(kilobytes)));
-      }
+      // The row is already there, so this is a RE-write of an article the
+      // ledger has met. Two things may still need filling in: the size, if the
+      // bytes were freed and the article has been written again, and the
+      // keywords, if the row predates them.
+      await (db.update(db.ledgerRows)
+            ..where(($LedgerRowsTable t) => t.articleId.equals(articleId)))
+          .write(LedgerRowsCompanion(
+        kilobytes: existing.kilobytes == 0 ? Value(kilobytes) : const Value.absent(),
+        keywords: existing.keywords == '[]' && keywords.isNotEmpty
+            ? Value(encodeList(keywords))
+            : const Value.absent(),
+        // Re-writing an old article makes it recent again, which is the point:
+        // the writer should not immediately produce a near-copy of it.
+        lastSeenDay: Value(day),
+      ));
       return;
     }
     await db.into(db.ledgerRows).insert(
           LedgerRowsCompanion.insert(
             articleId: articleId,
             title: title,
-            topic: Value(topic),
+            keywords: Value(encodeList(keywords)),
             kilobytes: Value(kilobytes),
+            lastSeenDay: Value(day),
           ),
         );
   }
@@ -349,12 +410,122 @@ class LibraryRepository {
     if (row == null) return;
     if (row.goneReason != null) return; // already freed; do not double-count
 
+    // The bytes actually go. This is the line that was missing: `kilobytes` was
+    // set to zero and the body stayed on disk forever, because there was no
+    // body table to delete from.
+    //
+    // Note what is NOT in scope: `reads` and `listens` are not parameters of
+    // this method and no line in it can reach them. That is invariant 4, and it
+    // is enforced by the signature rather than by care.
+    await deleteArticle(articleId);
+
     await (db.update(db.ledgerRows)
           ..where(($LedgerRowsTable t) => t.articleId.equals(articleId)))
         .write(LedgerRowsCompanion(
       kilobytes: const Value(0),
       freedKilobytes: Value(row.freedKilobytes + kilobytes),
       goneReason: Value(reason),
+    ));
+  }
+
+  // ── instructions ──────────────────────────────────────────────────────
+  //
+  // The reader's own words about what to write. A real collection, not a
+  // preference: rows are added, edited, searched and deleted independently, and
+  // one is picked per article. It replaced the topic presets, which were
+  // read-only in practice — nothing ever called `setPresets`.
+
+  /// Saved instructions, most recently relevant first.
+  ///
+  /// "Most recently relevant" is `lastUsedDay` when there is one and
+  /// `createdDay` when there is not — one expression, so an instruction written
+  /// in March and never used sorts below one used yesterday rather than above
+  /// it. `limit` is how the picker asks for its ten; the manager passes none.
+  Future<List<Instruction>> instructions({int? limit}) async {
+    final List<InstructionRow> rows = await (db.select(db.instructionRows)
+          ..orderBy(<OrderClauseGenerator<$InstructionRowsTable>>[
+            ($InstructionRowsTable t) => OrderingTerm(
+                  expression: coalesce(<Expression<Object>>[
+                    t.lastUsedDay,
+                    t.createdDay,
+                  ]),
+                  mode: OrderingMode.desc,
+                ),
+          ])
+          ..limit(limit ?? -1))
+        .get();
+    return <Instruction>[
+      for (final InstructionRow r in rows)
+        Instruction(
+          id: r.id,
+          text: r.instructionText,
+          createdDay: r.createdDay,
+          lastUsedDay: r.lastUsedDay,
+          useCount: r.useCount,
+        ),
+    ];
+  }
+
+  /// The titles of the last few articles, newest first.
+  ///
+  /// This is what stops the writer producing its fourth piece about the same
+  /// idea in different words. It reads the LEDGER rather than the queue,
+  /// because the point is to avoid what has already been read — including
+  /// articles that have since been deleted from the queue, which are exactly
+  /// the ones the writer would otherwise cheerfully repeat.
+  ///
+  /// Twelve is a guess with a reason: at three articles a day that is four
+  /// days of memory, which is long enough to break a run of similar pieces and
+  /// short enough that the list stays under a tenth of the prompt.
+  Future<List<String>> recentTitles({int limit = 12}) async {
+    final List<LedgerRow> rows = await (db.select(db.ledgerRows)
+          ..orderBy(<OrderClauseGenerator<$LedgerRowsTable>>[
+            ($LedgerRowsTable t) => OrderingTerm(
+                  expression: t.lastSeenDay,
+                  mode: OrderingMode.desc,
+                ),
+          ])
+          ..limit(limit))
+        .get();
+    return <String>[for (final LedgerRow r in rows) r.title];
+  }
+
+  /// Add or update one. The id is the caller's, so an edit keeps its identity
+  /// and a new one is a new row.
+  Future<void> upsertInstruction(Instruction i) async {
+    await db.into(db.instructionRows).insertOnConflictUpdate(
+          InstructionRowsCompanion.insert(
+            id: i.id,
+            instructionText: i.text,
+            createdDay: i.createdDay,
+            lastUsedDay: Value(i.lastUsedDay),
+            useCount: Value(i.useCount),
+          ),
+        );
+  }
+
+  Future<void> deleteInstruction(String id) async {
+    await (db.delete(db.instructionRows)
+          ..where(($InstructionRowsTable t) => t.id.equals(id)))
+        .go();
+  }
+
+  /// Mark an instruction as used, now.
+  ///
+  /// Separate from [upsertInstruction] because it is the one write that happens
+  /// as a SIDE EFFECT of writing an article, and it must never be able to fail
+  /// the article: the count is a nicety, the article is the thing that was paid
+  /// for.
+  Future<void> touchInstruction(String id, String day) async {
+    final InstructionRow? row = await (db.select(db.instructionRows)
+          ..where(($InstructionRowsTable t) => t.id.equals(id)))
+        .getSingleOrNull();
+    if (row == null) return; // deleted since it was picked; nothing to record
+    await (db.update(db.instructionRows)
+          ..where(($InstructionRowsTable t) => t.id.equals(id)))
+        .write(InstructionRowsCompanion(
+      lastUsedDay: Value(day),
+      useCount: Value(row.useCount + 1),
     ));
   }
 
@@ -369,6 +540,7 @@ class LibraryRepository {
   }
 
   static LedgerEntry _toEntry(LedgerRow r) => LedgerEntry(
+        keywords: _decodeList(r.keywords),
         articleId: r.articleId,
         title: r.title,
         topic: r.topic,
@@ -383,6 +555,173 @@ class LibraryRepository {
     if (raw == null) return null;
     if (raw == 'freedForSpace') return GoneReason.freedForSpace;
     return GoneReason.freedByUser;
+  }
+
+  // ── article bodies ────────────────────────────────────────────────────
+  //
+  // Everything above this line is identity and counts. This is the only place
+  // the TEXT is stored, and storing it is what makes a card survive a restart:
+  // a card is identified by its title and its keywords, and before this the
+  // body lived in memory only, so the card came back reading `0 words` and
+  // opened onto nothing.
+  //
+  // It is also what finally makes `freeSpace` mean something. Until now the
+  // ledger's `kilobytes` was invented from the word count, and there were no
+  // bytes to free.
+
+  /// The stored body for one article, or null if it was never stored or its
+  /// bytes have been freed.
+  Future<Article?> loadArticle(String articleId) async {
+    final ArticleRow? row = await (db.select(db.articleRows)
+          ..where(($ArticleRowsTable t) => t.articleId.equals(articleId)))
+        .getSingleOrNull();
+    if (row == null) return null;
+    return _articleFromRow(row);
+  }
+
+  /// Store a body and its real size.
+  ///
+  /// Returns the size in BYTES, measured rather than estimated — the caller
+  /// puts it on the ledger, so the storage bar and the shelf agree with each
+  /// other instead of one of them guessing.
+  Future<int> saveArticle(Article a) async {
+    final String sentences = jsonEncode(<String, Object?>{
+      // Wrapped rather than given a column of its own: `titleCn` is display
+      // only, it is optional on every older row, and a schema migration plus a
+      // codegen pass is a lot of machinery for one caption. A bare LIST is
+      // still accepted on read, so rows written before this stays readable.
+      if (a.titleCn.isNotEmpty) 'titleCn': a.titleCn,
+      'items': <Object?>[
+        for (final Sentence s in a.sentences)
+          <String, Object?>{
+            'en': s.english,
+            'cn': s.chinese,
+            if (s.audioPath != null) 'audio': s.audioPath,
+          },
+      ],
+    });
+    final String marks = jsonEncode(<Object?>[
+      for (final Mark m in a.marks)
+        <String, Object?>{
+          'surface': m.surface,
+          'lemma': m.lemma,
+          'sentence': m.sentenceIndex,
+          'tier': m.tier.name,
+        },
+    ]);
+    final String keywords = encodeList(a.keywords);
+
+    // The real number, measured rather than guessed. UTF-8 bytes, because that
+    // is what the file will actually cost on disk.
+    final int bytes = utf8.encode(sentences).length +
+        utf8.encode(marks).length +
+        utf8.encode(keywords).length;
+
+    await db.into(db.articleRows).insertOnConflictUpdate(
+          ArticleRowsCompanion.insert(
+            articleId: a.id,
+            title: a.title,
+            keywords: Value(keywords),
+            sentences: sentences,
+            marks: marks,
+            wordCount: Value(a.wordCount),
+            minuteEstimate: Value(a.minuteEstimate),
+            bytes: Value(bytes),
+          ),
+        );
+    return bytes;
+  }
+
+  /// Drop a body. Called ONLY from `freeSpace`, and it deliberately cannot
+  /// reach a counter — see the note on that method.
+  Future<void> deleteArticle(String articleId) async {
+    await (db.delete(db.articleRows)
+          ..where(($ArticleRowsTable t) => t.articleId.equals(articleId)))
+        .go();
+  }
+
+  /// Hydrate a slot's article from the body table, falling back to the ledger.
+  ///
+  /// The fallback is not a nicety: a freed article has no body and a card for
+  /// it must still say what it was called and what it was about, and an article
+  /// written before bodies were stored has a ledger row and nothing else.
+  Article _articleOf(
+    String articleId,
+    Map<String, ArticleRow> bodies,
+    Map<String, LedgerRow> ledger,
+  ) {
+    final ArticleRow? body = bodies[articleId];
+    if (body != null) return _articleFromRow(body);
+    final LedgerRow? meta = ledger[articleId];
+    return Article(
+      id: articleId,
+      title: meta?.title ?? articleId,
+      keywords: meta == null ? const <String>[] : _decodeList(meta.keywords),
+      sentences: const <Sentence>[],
+      marks: const <Mark>[],
+      wordCount: 0,
+      minuteEstimate: 0,
+    );
+  }
+
+  static Article _articleFromRow(ArticleRow row) {
+    final List<Sentence> sentences = <Sentence>[];
+    final Object? rawS = jsonDecode(row.sentences);
+    // Two shapes on disk: a bare LIST (rows written before `titleCn`), or a
+    // MAP carrying the Chinese title and the list under `items`. Both are
+    // normal; the list is not a fallback for corrupt data, it is the old file.
+    String titleCn = '';
+    Object? items = rawS;
+    if (rawS is Map) {
+      items = rawS['items'];
+      final Object? t = rawS['titleCn'];
+      if (t is String) titleCn = t;
+    }
+    if (items is List) {
+      for (final Object? s in items) {
+        if (s is! Map) continue;
+        final Object? en = s['en'];
+        if (en is! String || en.isEmpty) continue;
+        final Object? cn = s['cn'];
+        final Object? audio = s['audio'];
+        sentences.add(Sentence(
+          english: en,
+          chinese: cn is String ? cn : '',
+          audioPath: audio is String && audio.isNotEmpty ? audio : null,
+        ));
+      }
+    }
+
+    final List<Mark> marks = <Mark>[];
+    final Object? rawM = jsonDecode(row.marks);
+    if (rawM is List) {
+      for (final Object? m in rawM) {
+        if (m is! Map) continue;
+        final Object? surface = m['surface'];
+        final Object? lemma = m['lemma'];
+        if (surface is! String || lemma is! String) continue;
+        final Object? at = m['sentence'];
+        marks.add(Mark(
+          surface: surface,
+          lemma: lemma,
+          sentenceIndex: at is int ? at : 0,
+          tier: m['tier'] == 'unfamiliar'
+              ? MarkTier.unfamiliar
+              : MarkTier.difficult,
+        ));
+      }
+    }
+
+    return Article(
+      id: row.articleId,
+      title: row.title,
+      titleCn: titleCn,
+      keywords: _decodeList(row.keywords),
+      sentences: sentences,
+      marks: marks,
+      wordCount: row.wordCount,
+      minuteEstimate: row.minuteEstimate,
+    );
   }
 
   /// *Most revisited*: a GROUP BY over the day rows, not a stored total.
@@ -568,12 +907,12 @@ class LibraryRepository {
     if (row == null) return const ReadingPlan();
     return ReadingPlan(
       reader: row.reader,
-      topics: _decodeList(row.topics),
       style: _decodeList(row.style),
       gloss: _decodeList(row.gloss),
       avoid: _decodeList(row.avoid),
-      length: row.length,
-      marked: row.marked,
+      shortWords: row.shortWords,
+      mediumWords: row.mediumWords,
+      longWords: row.longWords,
       raw: row.raw,
     );
   }
@@ -583,12 +922,12 @@ class LibraryRepository {
           PlanRowsCompanion.insert(
             id: const Value(1),
             reader: Value(plan.reader),
-            topics: Value(encodeList(plan.topics)),
             style: Value(encodeList(plan.style)),
             gloss: Value(encodeList(plan.gloss)),
             avoid: Value(encodeList(plan.avoid)),
-            length: Value(plan.length),
-            marked: Value(plan.marked),
+            shortWords: Value(plan.shortWords),
+            mediumWords: Value(plan.mediumWords),
+            longWords: Value(plan.longWords),
             raw: Value(plan.raw),
           ),
         );

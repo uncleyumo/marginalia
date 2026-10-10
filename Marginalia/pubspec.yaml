@@ -3,7 +3,7 @@ description: "No-Stop English — 三篇文章永远在等你。离线优先的�
 publish_to: "none"
 
 # The version is deliberately not a release train. Design v9 §4e.
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -71,6 +71,17 @@ dependencies:
   # ── misc ─────────────────────────────────────────────────────────────────
   intl: ^0.19.0
   collection: ^1.18.0
+
+  # ── the version on screen ───────────────────────────────────────────────
+  # Settings states which build is installed, because during iteration the only
+  # way to know whether the phone is running the APK you just made is to ask it.
+  #
+  # This reads `versionName` / `versionCode` from the Android package manager —
+  # that is, what is ACTUALLY INSTALLED, not what the source tree says. The
+  # alternative was a hand-maintained constant, which is precisely the thing
+  # that goes stale the moment somebody forgets, and it would be wrong in the
+  # one situation it exists for.
+  package_info_plus: ^8.1.0
 
 dev_dependencies:
   flutter_test:

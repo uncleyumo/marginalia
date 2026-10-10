@@ -17,6 +17,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'log.dart';
+
 /// A failure a reader can be told about in one sentence.
 ///
 /// Every network error in this app arrives here rather than as a raw exception:
@@ -24,9 +26,25 @@ import 'package:http/http.dart' as http;
 /// different fixes, and an app that reports them the same way is an app that
 /// cannot help.
 class RemoteFailure implements Exception {
-  const RemoteFailure(this.message);
+  const RemoteFailure(this.message, {this.spent = false});
 
   final String message;
+
+  /// Whether money left the phone before this failed.
+  ///
+  /// The app's identity, reduced to one boolean: it can say whether the reader
+  /// was charged. It used to be answerable with a constant — one tap, one call,
+  /// so a failure meant nothing was spent — and it stopped being answerable
+  /// when the writer became an agent that may make several calls. A run that
+  /// fails on its third call has been paid for twice, and the sentence the
+  /// reader sees has to say so.
+  final bool spent;
+
+  /// The clause to append to a failure message. Exactly one of these is true,
+  /// and there is no third option.
+  String get cost => spent
+      ? ' Nothing was written, but the calls already made were still charged.'
+      : ' Nothing was written and nothing was spent.';
 
   @override
   String toString() => message;
@@ -137,6 +155,19 @@ class VoiceEndpoint {
   );
 }
 
+/// The "any voice" pick.
+///
+/// It is NOT a voice id — the API would reject it. It is a mode: the player
+/// rolls one of the real ids and uses that. Re-rolled at the start of each
+/// playback, so one article is spoken by one consistent narrator and the next
+/// article may be somebody else. Changing voice mid-sentence is a glitch;
+/// changing voice between articles is variety.
+const String kVoiceRandom = 'Random';
+
+/// The real voice ids, in the order Settings lists them.
+List<String> voiceChoices() =>
+    <String>[kVoiceRandom, ...VoiceEndpoint.mimo.voices];
+
 /// The instruction sent with every synthesis. A recorded voice with no
 /// direction reads like a radio advert; one sentence of direction is the
 /// difference between a recording and a narrator.
@@ -151,33 +182,74 @@ class RemoteApi {
 
   final http.Client _client;
 
-  static const Duration _writeTimeout = Duration(seconds: 60);
+  /// Measured, not chosen: a real 180-word article with its Chinese took 72 s
+  /// from MiMo, and a 500-word one is about three times that. The old value was
+  /// 60 s, which cut off working calls — and a timeout on a call that was going
+  /// to succeed is the worst outcome this app has, because it charges the
+  /// reader and hands them nothing.
+  static const Duration _writeTimeout = Duration(seconds: 240);
   static const Duration _speakTimeout = Duration(seconds: 45);
 
   /// One writing call. Returns the assistant's text, which is JSON because the
   /// prompt asks for JSON and the parser refuses anything else.
+  ///
+  /// [what] names the job in the reader's words, because it is what a failure
+  /// message is built from. Every failure path used to say "write an article",
+  /// which turned a plan rewrite that timed out into "The provider is having a
+  /// bad minute (write an article)" — a sentence that describes something the
+  /// reader did not ask for.
   Future<String> write({
     required WriterEndpoint endpoint,
     required String apiKey,
     required String system,
     required String user,
+    String what = 'write an article',
   }) async {
-    final http.Response res = await _post(
-      url: '${endpoint.baseUrl}/chat/completions',
-      apiKey: apiKey,
-      body: <String, Object?>{
-        'model': endpoint.model,
-        'messages': <Map<String, String>>[
-          <String, String>{'role': 'system', 'content': system},
-          <String, String>{'role': 'user', 'content': user},
-        ],
-        'temperature': 0.4,
-        'response_format': <String, Object?>{'type': 'json_object'},
-      },
-      timeout: _writeTimeout,
-      what: 'write an article',
-    );
-    return _text(res, what: 'write an article');
+    // A run id, even on the one-call path. Without it a plan rewrite left a
+    // single orphan line ("could not reach") with nothing to say what it was
+    // for, which is exactly the unreadable log this screen exists to replace.
+    final String runId =
+        'r${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+    AgentLog.instance.beginRun(runId, what);
+    AgentLog.instance.info('plan', 'started', runId: runId, detail: <String, Object?>{
+      'what': what,
+      'endpoint': endpoint.id,
+      'model': endpoint.model,
+    });
+    final DateTime t0 = DateTime.now();
+    try {
+      final http.Response res = await _post(
+        url: '${endpoint.baseUrl}/chat/completions',
+        apiKey: apiKey,
+        body: <String, Object?>{
+          'model': endpoint.model,
+          'messages': <Map<String, String>>[
+            <String, String>{'role': 'system', 'content': system},
+            <String, String>{'role': 'user', 'content': user},
+          ],
+          'temperature': 0.4,
+          'response_format': <String, Object?>{'type': 'json_object'},
+        },
+        timeout: _writeTimeout,
+        what: what,
+        runId: runId,
+      );
+      final String out = _text(res, what: what);
+      AgentLog.instance.info('done', 'finished OK', runId: runId,
+          detail: <String, Object?>{
+            'ms': DateTime.now().difference(t0).inMilliseconds,
+            'chars': out.length,
+          });
+      return out;
+    } catch (e) {
+      // `_post` already logged the specific reason; this line only closes the
+      // run so the card is not left open with no outcome on it.
+      if (e is! RemoteFailure) {
+        AgentLog.instance.error('done', 'failed', runId: runId,
+            detail: <String, Object?>{'error': '$e'});
+      }
+      rethrow;
+    }
   }
 
   /// The cheapest possible round trip, used by Settings → Test.
@@ -194,6 +266,7 @@ class RemoteApi {
       apiKey: apiKey,
       system: 'Reply with JSON only.',
       user: 'Return exactly this JSON and nothing else: {"ok":true}',
+      what: 'checking the key',
     );
     return out;
   }
@@ -223,10 +296,10 @@ class RemoteApi {
         'audio': <String, Object?>{'format': 'wav', 'voice': voice},
       },
       timeout: _speakTimeout,
-      what: 'speak a sentence',
+      what: 'speaking a sentence',
     );
 
-    final Map<String, dynamic> body = _object(res, what: 'speak a sentence');
+    final Map<String, dynamic> body = _object(res, what: 'speaking a sentence');
     final Object? choices = body['choices'];
     if (choices is! List || choices.isEmpty) {
       throw const RemoteFailure('MiMo returned no audio. Nothing was spoken.');
@@ -271,6 +344,7 @@ class RemoteApi {
     required Map<String, Object?> body,
     required Duration timeout,
     required String what,
+    String runId = '',
   }) async {
     if (apiKey.trim().isEmpty) {
       throw const RemoteFailure('No key is saved, so nothing was sent.');
@@ -290,28 +364,60 @@ class RemoteApi {
     } on RemoteFailure {
       rethrow;
     } catch (e) {
-      throw RemoteFailure(
-          'Could not reach $url — ${_short(e)}. Nothing was sent and nothing '
-          'was spent.');
+      // No claim about money here. THIS request was not sent, but whether the
+      // reader has already been charged for earlier ones is not something this
+      // layer knows — the agent does. The clause is appended at the point that
+      // displays the failure, from `RemoteFailure.cost`, so there is exactly
+      // one place that can get it wrong.
+      //
+      // THE READER GETS A SENTENCE; THE LOG GETS THE TRUTH.
+      //
+      // This used to interpolate the exception, and the offline test caught what
+      // that looks like on a phone with the radio off:
+      //
+      //   Could not reach https://api.xiaomimimo.com/v1/chat/completions —
+      //   ClientException with SocketException: Failed host lookup:
+      //   'api.xiaomimimo.com' (OS Error: ... Nothing was written and nothing
+      //   was spent.
+      //
+      // A stack-trace fragment, a full URL, and a truncated parenthesis, in a
+      // toast, in front of somebody who is learning English. The sentence below
+      // says the same thing and is actionable — "check your connection" is
+      // something a reader can do, and `Failed host lookup` is not.
+      AgentLog.instance.error('http', 'could not reach the provider',
+          runId: runId,
+          detail: <String, Object?>{
+            'what': what,
+            'error': '$e',
+          });
+      throw RemoteFailure('Could not reach the provider — check your '
+          'connection, then try again.');
     }
     if (res.statusCode >= 200 && res.statusCode < 300) return res;
     throw RemoteFailure(_explain(res, what));
   }
 
   /// Turn an HTTP status into a sentence a reader can act on.
+  ///
+  /// [what] is a GERUND PHRASE — "writing an article", "rewriting the plan" —
+  /// because it lands in the middle of a sentence. The previous form was a
+  /// verb phrase, which produced "That address has no speak a sentence
+  /// endpoint" and "nothing to speak a sentence": two messages that had never
+  /// been read out loud.
   String _explain(http.Response res, String what) {
     final String raw = res.body;
     final String detail = _errorDetail(raw);
     switch (res.statusCode) {
       case 401:
       case 403:
-        return 'The key was refused ($what). Check it and save it again.';
+        return 'The key was refused while $what. Check it and save it again.';
       case 404:
-        return 'That address has no $what endpoint ($what). Check the base URL.';
+        return 'That address has no endpoint for $what. Check the base URL.';
       case 429:
         return 'The provider is rate-limiting this phone. Try again shortly.';
       case >= 500:
-        return 'The provider is having a bad minute ($what). Try again shortly.';
+        return 'The provider is having a bad minute while $what. Try again '
+            'shortly.';
       default:
         return detail.isEmpty
             ? 'The request failed with ${res.statusCode}.'
@@ -340,7 +446,8 @@ class RemoteApi {
     final Map<String, dynamic> body = _object(res, what: what);
     final Object? choices = body['choices'];
     if (choices is! List || choices.isEmpty) {
-      throw RemoteFailure('The provider answered, but with nothing to $what.');
+      throw RemoteFailure(
+          'The provider answered, but returned nothing for: $what.');
     }
     final Object? first = choices.first;
     if (first is! Map) return '';
@@ -355,14 +462,9 @@ class RemoteApi {
       final Object? decoded = jsonDecode(res.body);
       if (decoded is Map<String, dynamic>) return decoded;
     } catch (_) {
-      throw RemoteFailure('The answer to "$what" was not json at all.');
+      throw RemoteFailure('The provider\'s answer ($what) was not json at all.');
     }
-    throw RemoteFailure('The answer to "$what" was empty.');
-  }
-
-  static String _short(Object e) {
-    final String s = '$e';
-    return s.length <= 90 ? s : '${s.substring(0, 90)}…';
+    throw RemoteFailure('The provider\'s answer ($what) was empty.');
   }
 
   void close() => _client.close();

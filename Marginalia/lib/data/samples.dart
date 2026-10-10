@@ -21,16 +21,22 @@ class SampleArticle {
   const SampleArticle({
     required this.id,
     required this.title,
-    required this.topic,
     required this.sentences,
     required this.marks,
     required this.wordCount,
     required this.minuteEstimate,
+    this.keywords = const <String>[],
+    this.titleCn = '',
   });
 
   final String id;
   final String title;
-  final String topic;
+  final String titleCn;
+
+  /// What the sample is about, in the same shape the writer now returns.
+  /// Replaces the single `topic` the bundle used to carry.
+  final List<String> keywords;
+
   final List<Sentence> sentences;
   final List<Mark> marks;
   final int wordCount;
@@ -95,7 +101,8 @@ class SampleArticle {
     return SampleArticle(
       id: '${j['id'] ?? ''}',
       title: '${j['title'] ?? ''}',
-      topic: '${j['topic'] ?? ''}',
+      titleCn: '${j['titleCn'] ?? j['title_cn'] ?? ''}',
+      keywords: _keywords(j['keywords']),
       sentences: sentences,
       marks: marks,
       wordCount: j['wordCount'] is int ? j['wordCount'] as int : 0,
@@ -107,12 +114,25 @@ class SampleArticle {
   Article toArticle() => Article(
         id: id,
         title: title,
-        topic: topic,
+        titleCn: titleCn,
+        keywords: keywords,
         sentences: sentences,
         marks: marks,
         wordCount: wordCount,
         minuteEstimate: minuteEstimate,
       );
+}
+
+/// Read the keywords out of the bundled json, tolerating anything.
+///
+/// A sample with no keywords is a normal sample — the field was added after the
+/// bundle was written, and a missing list must not cost the reader the article.
+List<String> _keywords(Object? raw) {
+  if (raw is! List) return const <String>[];
+  return <String>[
+    for (final Object? k in raw)
+      if (k is String && k.trim().isNotEmpty) k.trim(),
+  ];
 }
 
 /// Reads the bundled samples. Called once, at boot.

@@ -2,11 +2,15 @@
   "_comment": "Sample article. Its job is to make the first launch honest: a fresh install with no API key must still have something to read, hear, and tap. Structure mirrors the real writer's output (DESIGN §10) so swapping in a written article is a file swap, not a migration. Marked words are a tier, never a verdict — 'unfamiliar' gets the vermilion pencil rule, 'difficult' gets the jade one. There is no 'known'.",
   "id": "a-sample-pointers",
   "title": "What a Pointer Really Is",
-  "topic": "C language",
-  "focus": "the one-line mental model",
+  "titleCn": "指针到底是什么",
   "wordCount": 312,
   "minuteEstimate": 4,
   "audioPath": null,
+  "keywords": [
+    "pointers",
+    "memory",
+    "C language"
+  ],
   "sentences": [
     {
       "en": "Most beginners meet pointers in the second week of C, and most beginners hate them.",
@@ -65,21 +69,101 @@
     }
   ],
   "marks": [
-    {"surface": "pointers", "lemma": "pointer", "sentence": 0, "tier": "unfamiliar"},
-    {"surface": "beginners", "lemma": "beginner", "sentence": 0, "tier": "learned"},
-    {"surface": "hate", "lemma": "hate", "sentence": 0, "tier": "learned"},
-    {"surface": "pointers", "lemma": "pointer", "sentence": 0, "tier": "unfamiliar"},
-    {"surface": "address", "lemma": "address", "sentence": 3, "tier": "unfamiliar"},
-    {"surface": "memory", "lemma": "memory", "sentence": 3, "tier": "learned"},
-    {"surface": "reserves", "lemma": "reserve", "sentence": 4, "tier": "learned"},
-    {"surface": "block", "lemma": "block", "sentence": 4, "tier": "learned"},
-    {"surface": "dereference", "lemma": "dereference", "sentence": 5, "tier": "unfamiliar"},
-    {"surface": "set", "lemma": "set", "sentence": 6, "tier": "learned"},
-    {"surface": "crashes", "lemma": "crash", "sentence": 6, "tier": "unfamiliar"},
-    {"surface": "segmentation", "lemma": "segmentation", "sentence": 6, "tier": "unfamiliar"},
-    {"surface": "allocate", "lemma": "allocate", "sentence": 7, "tier": "unfamiliar"},
-    {"surface": "heap", "lemma": "heap", "sentence": 7, "tier": "unfamiliar"},
-    {"surface": "leaks", "lemma": "leak", "sentence": 8, "tier": "unfamiliar"},
-    {"surface": "forget", "lemma": "forget", "sentence": 8, "tier": "learned"}
+    {
+      "surface": "pointers",
+      "lemma": "pointer",
+      "sentence": 0,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "beginners",
+      "lemma": "beginner",
+      "sentence": 0,
+      "tier": "learned"
+    },
+    {
+      "surface": "hate",
+      "lemma": "hate",
+      "sentence": 0,
+      "tier": "learned"
+    },
+    {
+      "surface": "pointers",
+      "lemma": "pointer",
+      "sentence": 0,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "address",
+      "lemma": "address",
+      "sentence": 3,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "memory",
+      "lemma": "memory",
+      "sentence": 3,
+      "tier": "learned"
+    },
+    {
+      "surface": "reserves",
+      "lemma": "reserve",
+      "sentence": 4,
+      "tier": "learned"
+    },
+    {
+      "surface": "block",
+      "lemma": "block",
+      "sentence": 4,
+      "tier": "learned"
+    },
+    {
+      "surface": "dereference",
+      "lemma": "dereference",
+      "sentence": 5,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "set",
+      "lemma": "set",
+      "sentence": 6,
+      "tier": "learned"
+    },
+    {
+      "surface": "crashes",
+      "lemma": "crash",
+      "sentence": 6,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "segmentation",
+      "lemma": "segmentation",
+      "sentence": 6,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "allocate",
+      "lemma": "allocate",
+      "sentence": 7,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "heap",
+      "lemma": "heap",
+      "sentence": 7,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "leaks",
+      "lemma": "leak",
+      "sentence": 8,
+      "tier": "unfamiliar"
+    },
+    {
+      "surface": "forget",
+      "lemma": "forget",
+      "sentence": 8,
+      "tier": "learned"
+    }
   ]
 }

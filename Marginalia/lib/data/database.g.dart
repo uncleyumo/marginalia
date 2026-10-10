@@ -25,20 +25,20 @@ class $QueueRowsTable extends QueueRows
   late final GeneratedColumn<String> state = GeneratedColumn<String>(
       'state', aliasedName, false,
       type: DriftSqlType.string, requiredDuringInsert: true);
-  static const VerificationMeta _topicMeta = const VerificationMeta('topic');
+  static const VerificationMeta _instructionMeta =
+      const VerificationMeta('instruction');
   @override
-  late final GeneratedColumn<String> topic = GeneratedColumn<String>(
-      'topic', aliasedName, false,
+  late final GeneratedColumn<String> instruction = GeneratedColumn<String>(
+      'instruction', aliasedName, false,
       type: DriftSqlType.string,
       requiredDuringInsert: false,
       defaultValue: const Constant(''));
-  static const VerificationMeta _focusMeta = const VerificationMeta('focus');
+  static const VerificationMeta _instructionIdMeta =
+      const VerificationMeta('instructionId');
   @override
-  late final GeneratedColumn<String> focus = GeneratedColumn<String>(
-      'focus', aliasedName, false,
-      type: DriftSqlType.string,
-      requiredDuringInsert: false,
-      defaultValue: const Constant(''));
+  late final GeneratedColumn<String> instructionId = GeneratedColumn<String>(
+      'instruction_id', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
   static const VerificationMeta _plannedWordsMeta =
       const VerificationMeta('plannedWords');
   @override
@@ -47,14 +47,14 @@ class $QueueRowsTable extends QueueRows
       type: DriftSqlType.int,
       requiredDuringInsert: false,
       defaultValue: const Constant(300));
-  static const VerificationMeta _plannedMarkedMeta =
-      const VerificationMeta('plannedMarked');
+  static const VerificationMeta _plannedBandMeta =
+      const VerificationMeta('plannedBand');
   @override
-  late final GeneratedColumn<int> plannedMarked = GeneratedColumn<int>(
-      'planned_marked', aliasedName, false,
-      type: DriftSqlType.int,
+  late final GeneratedColumn<String> plannedBand = GeneratedColumn<String>(
+      'planned_band', aliasedName, false,
+      type: DriftSqlType.string,
       requiredDuringInsert: false,
-      defaultValue: const Constant(6));
+      defaultValue: const Constant('medium'));
   static const VerificationMeta _isWritingMeta =
       const VerificationMeta('isWriting');
   @override
@@ -76,10 +76,10 @@ class $QueueRowsTable extends QueueRows
         id,
         articleId,
         state,
-        topic,
-        focus,
+        instruction,
+        instructionId,
         plannedWords,
-        plannedMarked,
+        plannedBand,
         isWriting,
         position
       ];
@@ -108,13 +108,17 @@ class $QueueRowsTable extends QueueRows
     } else if (isInserting) {
       context.missing(_stateMeta);
     }
-    if (data.containsKey('topic')) {
+    if (data.containsKey('instruction')) {
       context.handle(
-          _topicMeta, topic.isAcceptableOrUnknown(data['topic']!, _topicMeta));
+          _instructionMeta,
+          instruction.isAcceptableOrUnknown(
+              data['instruction']!, _instructionMeta));
     }
-    if (data.containsKey('focus')) {
+    if (data.containsKey('instruction_id')) {
       context.handle(
-          _focusMeta, focus.isAcceptableOrUnknown(data['focus']!, _focusMeta));
+          _instructionIdMeta,
+          instructionId.isAcceptableOrUnknown(
+              data['instruction_id']!, _instructionIdMeta));
     }
     if (data.containsKey('planned_words')) {
       context.handle(
@@ -122,11 +126,11 @@ class $QueueRowsTable extends QueueRows
           plannedWords.isAcceptableOrUnknown(
               data['planned_words']!, _plannedWordsMeta));
     }
-    if (data.containsKey('planned_marked')) {
+    if (data.containsKey('planned_band')) {
       context.handle(
-          _plannedMarkedMeta,
-          plannedMarked.isAcceptableOrUnknown(
-              data['planned_marked']!, _plannedMarkedMeta));
+          _plannedBandMeta,
+          plannedBand.isAcceptableOrUnknown(
+              data['planned_band']!, _plannedBandMeta));
     }
     if (data.containsKey('is_writing')) {
       context.handle(_isWritingMeta,
@@ -153,14 +157,14 @@ class $QueueRowsTable extends QueueRows
           .read(DriftSqlType.string, data['${effectivePrefix}article_id'])!,
       state: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}state'])!,
-      topic: attachedDatabase.typeMapping
-          .read(DriftSqlType.string, data['${effectivePrefix}topic'])!,
-      focus: attachedDatabase.typeMapping
-          .read(DriftSqlType.string, data['${effectivePrefix}focus'])!,
+      instruction: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}instruction'])!,
+      instructionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}instruction_id']),
       plannedWords: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}planned_words'])!,
-      plannedMarked: attachedDatabase.typeMapping
-          .read(DriftSqlType.int, data['${effectivePrefix}planned_marked'])!,
+      plannedBand: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}planned_band'])!,
       isWriting: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}is_writing'])!,
       position: attachedDatabase.typeMapping
@@ -178,20 +182,42 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
   final int id;
   final String articleId;
   final String state;
-  final String topic;
-  final String focus;
+
+  /// What the reader asked for, in their own words. Empty is the ordinary case
+  /// and means the writer picks the subject.
+  ///
+  /// This replaced `topic`. A topic was a label the reader had to choose from a
+  /// list they had to maintain; an instruction is a sentence they type when
+  /// they want something specific and never otherwise. The text is stored ON
+  /// THE SLOT rather than as a reference, so a planned card keeps saying what
+  /// it was asked for even if that saved instruction is later edited or
+  /// deleted — what was asked for is a fact about this slot.
+  final String instruction;
+
+  /// Which saved instruction it came from, when it came from one.
+  ///
+  /// For ONE purpose: bumping that instruction's `lastUsedDay` and `useCount`
+  /// without matching on text. It is not a foreign key and nothing joins on it.
+  final String? instructionId;
   final int plannedWords;
-  final int plannedMarked;
+
+  /// Where [plannedWords] came from: 'short' | 'medium' | 'long' | 'custom'.
+  ///
+  /// Stored as text rather than an int so the column reads as what it is. The
+  /// name of the band and the number of words are two facts — a reader who
+  /// typed a custom 300 did not ask for `medium`, and a card that says they did
+  /// is a card that made up an answer.
+  final String plannedBand;
   final bool isWriting;
   final int position;
   const QueueRow(
       {required this.id,
       required this.articleId,
       required this.state,
-      required this.topic,
-      required this.focus,
+      required this.instruction,
+      this.instructionId,
       required this.plannedWords,
-      required this.plannedMarked,
+      required this.plannedBand,
       required this.isWriting,
       required this.position});
   @override
@@ -200,10 +226,12 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
     map['id'] = Variable<int>(id);
     map['article_id'] = Variable<String>(articleId);
     map['state'] = Variable<String>(state);
-    map['topic'] = Variable<String>(topic);
-    map['focus'] = Variable<String>(focus);
+    map['instruction'] = Variable<String>(instruction);
+    if (!nullToAbsent || instructionId != null) {
+      map['instruction_id'] = Variable<String>(instructionId);
+    }
     map['planned_words'] = Variable<int>(plannedWords);
-    map['planned_marked'] = Variable<int>(plannedMarked);
+    map['planned_band'] = Variable<String>(plannedBand);
     map['is_writing'] = Variable<bool>(isWriting);
     map['position'] = Variable<int>(position);
     return map;
@@ -214,10 +242,12 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
       id: Value(id),
       articleId: Value(articleId),
       state: Value(state),
-      topic: Value(topic),
-      focus: Value(focus),
+      instruction: Value(instruction),
+      instructionId: instructionId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(instructionId),
       plannedWords: Value(plannedWords),
-      plannedMarked: Value(plannedMarked),
+      plannedBand: Value(plannedBand),
       isWriting: Value(isWriting),
       position: Value(position),
     );
@@ -230,10 +260,10 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
       id: serializer.fromJson<int>(json['id']),
       articleId: serializer.fromJson<String>(json['articleId']),
       state: serializer.fromJson<String>(json['state']),
-      topic: serializer.fromJson<String>(json['topic']),
-      focus: serializer.fromJson<String>(json['focus']),
+      instruction: serializer.fromJson<String>(json['instruction']),
+      instructionId: serializer.fromJson<String?>(json['instructionId']),
       plannedWords: serializer.fromJson<int>(json['plannedWords']),
-      plannedMarked: serializer.fromJson<int>(json['plannedMarked']),
+      plannedBand: serializer.fromJson<String>(json['plannedBand']),
       isWriting: serializer.fromJson<bool>(json['isWriting']),
       position: serializer.fromJson<int>(json['position']),
     );
@@ -245,10 +275,10 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
       'id': serializer.toJson<int>(id),
       'articleId': serializer.toJson<String>(articleId),
       'state': serializer.toJson<String>(state),
-      'topic': serializer.toJson<String>(topic),
-      'focus': serializer.toJson<String>(focus),
+      'instruction': serializer.toJson<String>(instruction),
+      'instructionId': serializer.toJson<String?>(instructionId),
       'plannedWords': serializer.toJson<int>(plannedWords),
-      'plannedMarked': serializer.toJson<int>(plannedMarked),
+      'plannedBand': serializer.toJson<String>(plannedBand),
       'isWriting': serializer.toJson<bool>(isWriting),
       'position': serializer.toJson<int>(position),
     };
@@ -258,20 +288,21 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
           {int? id,
           String? articleId,
           String? state,
-          String? topic,
-          String? focus,
+          String? instruction,
+          Value<String?> instructionId = const Value.absent(),
           int? plannedWords,
-          int? plannedMarked,
+          String? plannedBand,
           bool? isWriting,
           int? position}) =>
       QueueRow(
         id: id ?? this.id,
         articleId: articleId ?? this.articleId,
         state: state ?? this.state,
-        topic: topic ?? this.topic,
-        focus: focus ?? this.focus,
+        instruction: instruction ?? this.instruction,
+        instructionId:
+            instructionId.present ? instructionId.value : this.instructionId,
         plannedWords: plannedWords ?? this.plannedWords,
-        plannedMarked: plannedMarked ?? this.plannedMarked,
+        plannedBand: plannedBand ?? this.plannedBand,
         isWriting: isWriting ?? this.isWriting,
         position: position ?? this.position,
       );
@@ -280,14 +311,16 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
       id: data.id.present ? data.id.value : this.id,
       articleId: data.articleId.present ? data.articleId.value : this.articleId,
       state: data.state.present ? data.state.value : this.state,
-      topic: data.topic.present ? data.topic.value : this.topic,
-      focus: data.focus.present ? data.focus.value : this.focus,
+      instruction:
+          data.instruction.present ? data.instruction.value : this.instruction,
+      instructionId: data.instructionId.present
+          ? data.instructionId.value
+          : this.instructionId,
       plannedWords: data.plannedWords.present
           ? data.plannedWords.value
           : this.plannedWords,
-      plannedMarked: data.plannedMarked.present
-          ? data.plannedMarked.value
-          : this.plannedMarked,
+      plannedBand:
+          data.plannedBand.present ? data.plannedBand.value : this.plannedBand,
       isWriting: data.isWriting.present ? data.isWriting.value : this.isWriting,
       position: data.position.present ? data.position.value : this.position,
     );
@@ -299,10 +332,10 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
           ..write('id: $id, ')
           ..write('articleId: $articleId, ')
           ..write('state: $state, ')
-          ..write('topic: $topic, ')
-          ..write('focus: $focus, ')
+          ..write('instruction: $instruction, ')
+          ..write('instructionId: $instructionId, ')
           ..write('plannedWords: $plannedWords, ')
-          ..write('plannedMarked: $plannedMarked, ')
+          ..write('plannedBand: $plannedBand, ')
           ..write('isWriting: $isWriting, ')
           ..write('position: $position')
           ..write(')'))
@@ -310,8 +343,8 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
   }
 
   @override
-  int get hashCode => Object.hash(id, articleId, state, topic, focus,
-      plannedWords, plannedMarked, isWriting, position);
+  int get hashCode => Object.hash(id, articleId, state, instruction,
+      instructionId, plannedWords, plannedBand, isWriting, position);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -319,10 +352,10 @@ class QueueRow extends DataClass implements Insertable<QueueRow> {
           other.id == this.id &&
           other.articleId == this.articleId &&
           other.state == this.state &&
-          other.topic == this.topic &&
-          other.focus == this.focus &&
+          other.instruction == this.instruction &&
+          other.instructionId == this.instructionId &&
           other.plannedWords == this.plannedWords &&
-          other.plannedMarked == this.plannedMarked &&
+          other.plannedBand == this.plannedBand &&
           other.isWriting == this.isWriting &&
           other.position == this.position);
 }
@@ -331,20 +364,20 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
   final Value<int> id;
   final Value<String> articleId;
   final Value<String> state;
-  final Value<String> topic;
-  final Value<String> focus;
+  final Value<String> instruction;
+  final Value<String?> instructionId;
   final Value<int> plannedWords;
-  final Value<int> plannedMarked;
+  final Value<String> plannedBand;
   final Value<bool> isWriting;
   final Value<int> position;
   const QueueRowsCompanion({
     this.id = const Value.absent(),
     this.articleId = const Value.absent(),
     this.state = const Value.absent(),
-    this.topic = const Value.absent(),
-    this.focus = const Value.absent(),
+    this.instruction = const Value.absent(),
+    this.instructionId = const Value.absent(),
     this.plannedWords = const Value.absent(),
-    this.plannedMarked = const Value.absent(),
+    this.plannedBand = const Value.absent(),
     this.isWriting = const Value.absent(),
     this.position = const Value.absent(),
   });
@@ -352,10 +385,10 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
     this.id = const Value.absent(),
     required String articleId,
     required String state,
-    this.topic = const Value.absent(),
-    this.focus = const Value.absent(),
+    this.instruction = const Value.absent(),
+    this.instructionId = const Value.absent(),
     this.plannedWords = const Value.absent(),
-    this.plannedMarked = const Value.absent(),
+    this.plannedBand = const Value.absent(),
     this.isWriting = const Value.absent(),
     required int position,
   })  : articleId = Value(articleId),
@@ -365,10 +398,10 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
     Expression<int>? id,
     Expression<String>? articleId,
     Expression<String>? state,
-    Expression<String>? topic,
-    Expression<String>? focus,
+    Expression<String>? instruction,
+    Expression<String>? instructionId,
     Expression<int>? plannedWords,
-    Expression<int>? plannedMarked,
+    Expression<String>? plannedBand,
     Expression<bool>? isWriting,
     Expression<int>? position,
   }) {
@@ -376,10 +409,10 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
       if (id != null) 'id': id,
       if (articleId != null) 'article_id': articleId,
       if (state != null) 'state': state,
-      if (topic != null) 'topic': topic,
-      if (focus != null) 'focus': focus,
+      if (instruction != null) 'instruction': instruction,
+      if (instructionId != null) 'instruction_id': instructionId,
       if (plannedWords != null) 'planned_words': plannedWords,
-      if (plannedMarked != null) 'planned_marked': plannedMarked,
+      if (plannedBand != null) 'planned_band': plannedBand,
       if (isWriting != null) 'is_writing': isWriting,
       if (position != null) 'position': position,
     });
@@ -389,20 +422,20 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
       {Value<int>? id,
       Value<String>? articleId,
       Value<String>? state,
-      Value<String>? topic,
-      Value<String>? focus,
+      Value<String>? instruction,
+      Value<String?>? instructionId,
       Value<int>? plannedWords,
-      Value<int>? plannedMarked,
+      Value<String>? plannedBand,
       Value<bool>? isWriting,
       Value<int>? position}) {
     return QueueRowsCompanion(
       id: id ?? this.id,
       articleId: articleId ?? this.articleId,
       state: state ?? this.state,
-      topic: topic ?? this.topic,
-      focus: focus ?? this.focus,
+      instruction: instruction ?? this.instruction,
+      instructionId: instructionId ?? this.instructionId,
       plannedWords: plannedWords ?? this.plannedWords,
-      plannedMarked: plannedMarked ?? this.plannedMarked,
+      plannedBand: plannedBand ?? this.plannedBand,
       isWriting: isWriting ?? this.isWriting,
       position: position ?? this.position,
     );
@@ -420,17 +453,17 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
     if (state.present) {
       map['state'] = Variable<String>(state.value);
     }
-    if (topic.present) {
-      map['topic'] = Variable<String>(topic.value);
+    if (instruction.present) {
+      map['instruction'] = Variable<String>(instruction.value);
     }
-    if (focus.present) {
-      map['focus'] = Variable<String>(focus.value);
+    if (instructionId.present) {
+      map['instruction_id'] = Variable<String>(instructionId.value);
     }
     if (plannedWords.present) {
       map['planned_words'] = Variable<int>(plannedWords.value);
     }
-    if (plannedMarked.present) {
-      map['planned_marked'] = Variable<int>(plannedMarked.value);
+    if (plannedBand.present) {
+      map['planned_band'] = Variable<String>(plannedBand.value);
     }
     if (isWriting.present) {
       map['is_writing'] = Variable<bool>(isWriting.value);
@@ -447,10 +480,10 @@ class QueueRowsCompanion extends UpdateCompanion<QueueRow> {
           ..write('id: $id, ')
           ..write('articleId: $articleId, ')
           ..write('state: $state, ')
-          ..write('topic: $topic, ')
-          ..write('focus: $focus, ')
+          ..write('instruction: $instruction, ')
+          ..write('instructionId: $instructionId, ')
           ..write('plannedWords: $plannedWords, ')
-          ..write('plannedMarked: $plannedMarked, ')
+          ..write('plannedBand: $plannedBand, ')
           ..write('isWriting: $isWriting, ')
           ..write('position: $position')
           ..write(')'))
@@ -482,6 +515,14 @@ class $LedgerRowsTable extends LedgerRows
       type: DriftSqlType.string,
       requiredDuringInsert: false,
       defaultValue: const Constant(''));
+  static const VerificationMeta _keywordsMeta =
+      const VerificationMeta('keywords');
+  @override
+  late final GeneratedColumn<String> keywords = GeneratedColumn<String>(
+      'keywords', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant('[]'));
   static const VerificationMeta _readsMeta = const VerificationMeta('reads');
   @override
   late final GeneratedColumn<int> reads = GeneratedColumn<int>(
@@ -519,16 +560,26 @@ class $LedgerRowsTable extends LedgerRows
   late final GeneratedColumn<String> goneReason = GeneratedColumn<String>(
       'gone_reason', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _lastSeenDayMeta =
+      const VerificationMeta('lastSeenDay');
+  @override
+  late final GeneratedColumn<String> lastSeenDay = GeneratedColumn<String>(
+      'last_seen_day', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
   @override
   List<GeneratedColumn> get $columns => [
         articleId,
         title,
         topic,
+        keywords,
         reads,
         listens,
         kilobytes,
         freedKilobytes,
-        goneReason
+        goneReason,
+        lastSeenDay
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -556,6 +607,10 @@ class $LedgerRowsTable extends LedgerRows
       context.handle(
           _topicMeta, topic.isAcceptableOrUnknown(data['topic']!, _topicMeta));
     }
+    if (data.containsKey('keywords')) {
+      context.handle(_keywordsMeta,
+          keywords.isAcceptableOrUnknown(data['keywords']!, _keywordsMeta));
+    }
     if (data.containsKey('reads')) {
       context.handle(
           _readsMeta, reads.isAcceptableOrUnknown(data['reads']!, _readsMeta));
@@ -580,6 +635,12 @@ class $LedgerRowsTable extends LedgerRows
           goneReason.isAcceptableOrUnknown(
               data['gone_reason']!, _goneReasonMeta));
     }
+    if (data.containsKey('last_seen_day')) {
+      context.handle(
+          _lastSeenDayMeta,
+          lastSeenDay.isAcceptableOrUnknown(
+              data['last_seen_day']!, _lastSeenDayMeta));
+    }
     return context;
   }
 
@@ -595,6 +656,8 @@ class $LedgerRowsTable extends LedgerRows
           .read(DriftSqlType.string, data['${effectivePrefix}title'])!,
       topic: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}topic'])!,
+      keywords: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}keywords'])!,
       reads: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}reads'])!,
       listens: attachedDatabase.typeMapping
@@ -605,6 +668,8 @@ class $LedgerRowsTable extends LedgerRows
           .read(DriftSqlType.int, data['${effectivePrefix}freed_kilobytes'])!,
       goneReason: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}gone_reason']),
+      lastSeenDay: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}last_seen_day'])!,
     );
   }
 
@@ -617,27 +682,55 @@ class $LedgerRowsTable extends LedgerRows
 class LedgerRow extends DataClass implements Insertable<LedgerRow> {
   final String articleId;
   final String title;
+
+  /// HISTORICAL. What an article was about, as recorded when it was written,
+  /// for rows that predate keywords. Nothing reads it to decide anything and
+  /// new rows leave it empty — see [keywords].
   final String topic;
+
+  /// What the writer said the article was about, as a json list. The shelf
+  /// searches and displays these.
+  ///
+  /// Kept on the LEDGER rather than only in `article_rows` because the ledger
+  /// row outlives the bytes: a freed article still has to be findable and still
+  /// has to say what it was about, and `freeSpace` deliberately cannot reach
+  /// this column.
+  final String keywords;
   final int reads;
   final int listens;
   final int kilobytes;
   final int freedKilobytes;
   final String? goneReason;
+
+  /// `YYYY-MM-DD`, the day this article was last written or read.
+  ///
+  /// This column exists for one reader-facing reason: the writer is told what
+  /// it has recently produced, so it does not hand back a fourth article about
+  /// the same idea in different words. That needs an ORDER, and the ledger had
+  /// none — the day log orders reads, but a written-and-not-yet-read article is
+  /// exactly the one most likely to be repeated.
+  ///
+  /// Empty on rows that predate this column. Those sort last, which is right:
+  /// they are the oldest thing in the table.
+  final String lastSeenDay;
   const LedgerRow(
       {required this.articleId,
       required this.title,
       required this.topic,
+      required this.keywords,
       required this.reads,
       required this.listens,
       required this.kilobytes,
       required this.freedKilobytes,
-      this.goneReason});
+      this.goneReason,
+      required this.lastSeenDay});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['article_id'] = Variable<String>(articleId);
     map['title'] = Variable<String>(title);
     map['topic'] = Variable<String>(topic);
+    map['keywords'] = Variable<String>(keywords);
     map['reads'] = Variable<int>(reads);
     map['listens'] = Variable<int>(listens);
     map['kilobytes'] = Variable<int>(kilobytes);
@@ -645,6 +738,7 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
     if (!nullToAbsent || goneReason != null) {
       map['gone_reason'] = Variable<String>(goneReason);
     }
+    map['last_seen_day'] = Variable<String>(lastSeenDay);
     return map;
   }
 
@@ -653,6 +747,7 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
       articleId: Value(articleId),
       title: Value(title),
       topic: Value(topic),
+      keywords: Value(keywords),
       reads: Value(reads),
       listens: Value(listens),
       kilobytes: Value(kilobytes),
@@ -660,6 +755,7 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
       goneReason: goneReason == null && nullToAbsent
           ? const Value.absent()
           : Value(goneReason),
+      lastSeenDay: Value(lastSeenDay),
     );
   }
 
@@ -670,11 +766,13 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
       articleId: serializer.fromJson<String>(json['articleId']),
       title: serializer.fromJson<String>(json['title']),
       topic: serializer.fromJson<String>(json['topic']),
+      keywords: serializer.fromJson<String>(json['keywords']),
       reads: serializer.fromJson<int>(json['reads']),
       listens: serializer.fromJson<int>(json['listens']),
       kilobytes: serializer.fromJson<int>(json['kilobytes']),
       freedKilobytes: serializer.fromJson<int>(json['freedKilobytes']),
       goneReason: serializer.fromJson<String?>(json['goneReason']),
+      lastSeenDay: serializer.fromJson<String>(json['lastSeenDay']),
     );
   }
   @override
@@ -684,11 +782,13 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
       'articleId': serializer.toJson<String>(articleId),
       'title': serializer.toJson<String>(title),
       'topic': serializer.toJson<String>(topic),
+      'keywords': serializer.toJson<String>(keywords),
       'reads': serializer.toJson<int>(reads),
       'listens': serializer.toJson<int>(listens),
       'kilobytes': serializer.toJson<int>(kilobytes),
       'freedKilobytes': serializer.toJson<int>(freedKilobytes),
       'goneReason': serializer.toJson<String?>(goneReason),
+      'lastSeenDay': serializer.toJson<String>(lastSeenDay),
     };
   }
 
@@ -696,26 +796,31 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
           {String? articleId,
           String? title,
           String? topic,
+          String? keywords,
           int? reads,
           int? listens,
           int? kilobytes,
           int? freedKilobytes,
-          Value<String?> goneReason = const Value.absent()}) =>
+          Value<String?> goneReason = const Value.absent(),
+          String? lastSeenDay}) =>
       LedgerRow(
         articleId: articleId ?? this.articleId,
         title: title ?? this.title,
         topic: topic ?? this.topic,
+        keywords: keywords ?? this.keywords,
         reads: reads ?? this.reads,
         listens: listens ?? this.listens,
         kilobytes: kilobytes ?? this.kilobytes,
         freedKilobytes: freedKilobytes ?? this.freedKilobytes,
         goneReason: goneReason.present ? goneReason.value : this.goneReason,
+        lastSeenDay: lastSeenDay ?? this.lastSeenDay,
       );
   LedgerRow copyWithCompanion(LedgerRowsCompanion data) {
     return LedgerRow(
       articleId: data.articleId.present ? data.articleId.value : this.articleId,
       title: data.title.present ? data.title.value : this.title,
       topic: data.topic.present ? data.topic.value : this.topic,
+      keywords: data.keywords.present ? data.keywords.value : this.keywords,
       reads: data.reads.present ? data.reads.value : this.reads,
       listens: data.listens.present ? data.listens.value : this.listens,
       kilobytes: data.kilobytes.present ? data.kilobytes.value : this.kilobytes,
@@ -724,6 +829,8 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
           : this.freedKilobytes,
       goneReason:
           data.goneReason.present ? data.goneReason.value : this.goneReason,
+      lastSeenDay:
+          data.lastSeenDay.present ? data.lastSeenDay.value : this.lastSeenDay,
     );
   }
 
@@ -733,18 +840,20 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
           ..write('articleId: $articleId, ')
           ..write('title: $title, ')
           ..write('topic: $topic, ')
+          ..write('keywords: $keywords, ')
           ..write('reads: $reads, ')
           ..write('listens: $listens, ')
           ..write('kilobytes: $kilobytes, ')
           ..write('freedKilobytes: $freedKilobytes, ')
-          ..write('goneReason: $goneReason')
+          ..write('goneReason: $goneReason, ')
+          ..write('lastSeenDay: $lastSeenDay')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(articleId, title, topic, reads, listens,
-      kilobytes, freedKilobytes, goneReason);
+  int get hashCode => Object.hash(articleId, title, topic, keywords, reads,
+      listens, kilobytes, freedKilobytes, goneReason, lastSeenDay);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -752,43 +861,51 @@ class LedgerRow extends DataClass implements Insertable<LedgerRow> {
           other.articleId == this.articleId &&
           other.title == this.title &&
           other.topic == this.topic &&
+          other.keywords == this.keywords &&
           other.reads == this.reads &&
           other.listens == this.listens &&
           other.kilobytes == this.kilobytes &&
           other.freedKilobytes == this.freedKilobytes &&
-          other.goneReason == this.goneReason);
+          other.goneReason == this.goneReason &&
+          other.lastSeenDay == this.lastSeenDay);
 }
 
 class LedgerRowsCompanion extends UpdateCompanion<LedgerRow> {
   final Value<String> articleId;
   final Value<String> title;
   final Value<String> topic;
+  final Value<String> keywords;
   final Value<int> reads;
   final Value<int> listens;
   final Value<int> kilobytes;
   final Value<int> freedKilobytes;
   final Value<String?> goneReason;
+  final Value<String> lastSeenDay;
   final Value<int> rowid;
   const LedgerRowsCompanion({
     this.articleId = const Value.absent(),
     this.title = const Value.absent(),
     this.topic = const Value.absent(),
+    this.keywords = const Value.absent(),
     this.reads = const Value.absent(),
     this.listens = const Value.absent(),
     this.kilobytes = const Value.absent(),
     this.freedKilobytes = const Value.absent(),
     this.goneReason = const Value.absent(),
+    this.lastSeenDay = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   LedgerRowsCompanion.insert({
     required String articleId,
     required String title,
     this.topic = const Value.absent(),
+    this.keywords = const Value.absent(),
     this.reads = const Value.absent(),
     this.listens = const Value.absent(),
     this.kilobytes = const Value.absent(),
     this.freedKilobytes = const Value.absent(),
     this.goneReason = const Value.absent(),
+    this.lastSeenDay = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : articleId = Value(articleId),
         title = Value(title);
@@ -796,22 +913,26 @@ class LedgerRowsCompanion extends UpdateCompanion<LedgerRow> {
     Expression<String>? articleId,
     Expression<String>? title,
     Expression<String>? topic,
+    Expression<String>? keywords,
     Expression<int>? reads,
     Expression<int>? listens,
     Expression<int>? kilobytes,
     Expression<int>? freedKilobytes,
     Expression<String>? goneReason,
+    Expression<String>? lastSeenDay,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
       if (articleId != null) 'article_id': articleId,
       if (title != null) 'title': title,
       if (topic != null) 'topic': topic,
+      if (keywords != null) 'keywords': keywords,
       if (reads != null) 'reads': reads,
       if (listens != null) 'listens': listens,
       if (kilobytes != null) 'kilobytes': kilobytes,
       if (freedKilobytes != null) 'freed_kilobytes': freedKilobytes,
       if (goneReason != null) 'gone_reason': goneReason,
+      if (lastSeenDay != null) 'last_seen_day': lastSeenDay,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -820,21 +941,25 @@ class LedgerRowsCompanion extends UpdateCompanion<LedgerRow> {
       {Value<String>? articleId,
       Value<String>? title,
       Value<String>? topic,
+      Value<String>? keywords,
       Value<int>? reads,
       Value<int>? listens,
       Value<int>? kilobytes,
       Value<int>? freedKilobytes,
       Value<String?>? goneReason,
+      Value<String>? lastSeenDay,
       Value<int>? rowid}) {
     return LedgerRowsCompanion(
       articleId: articleId ?? this.articleId,
       title: title ?? this.title,
       topic: topic ?? this.topic,
+      keywords: keywords ?? this.keywords,
       reads: reads ?? this.reads,
       listens: listens ?? this.listens,
       kilobytes: kilobytes ?? this.kilobytes,
       freedKilobytes: freedKilobytes ?? this.freedKilobytes,
       goneReason: goneReason ?? this.goneReason,
+      lastSeenDay: lastSeenDay ?? this.lastSeenDay,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -851,6 +976,9 @@ class LedgerRowsCompanion extends UpdateCompanion<LedgerRow> {
     if (topic.present) {
       map['topic'] = Variable<String>(topic.value);
     }
+    if (keywords.present) {
+      map['keywords'] = Variable<String>(keywords.value);
+    }
     if (reads.present) {
       map['reads'] = Variable<int>(reads.value);
     }
@@ -866,6 +994,9 @@ class LedgerRowsCompanion extends UpdateCompanion<LedgerRow> {
     if (goneReason.present) {
       map['gone_reason'] = Variable<String>(goneReason.value);
     }
+    if (lastSeenDay.present) {
+      map['last_seen_day'] = Variable<String>(lastSeenDay.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -878,11 +1009,13 @@ class LedgerRowsCompanion extends UpdateCompanion<LedgerRow> {
           ..write('articleId: $articleId, ')
           ..write('title: $title, ')
           ..write('topic: $topic, ')
+          ..write('keywords: $keywords, ')
           ..write('reads: $reads, ')
           ..write('listens: $listens, ')
           ..write('kilobytes: $kilobytes, ')
           ..write('freedKilobytes: $freedKilobytes, ')
           ..write('goneReason: $goneReason, ')
+          ..write('lastSeenDay: $lastSeenDay, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1574,13 +1707,6 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
       type: DriftSqlType.string,
       requiredDuringInsert: false,
       defaultValue: const Constant(''));
-  static const VerificationMeta _topicsMeta = const VerificationMeta('topics');
-  @override
-  late final GeneratedColumn<String> topics = GeneratedColumn<String>(
-      'topics', aliasedName, false,
-      type: DriftSqlType.string,
-      requiredDuringInsert: false,
-      defaultValue: const Constant('[]'));
   static const VerificationMeta _styleMeta = const VerificationMeta('style');
   @override
   late final GeneratedColumn<String> style = GeneratedColumn<String>(
@@ -1602,20 +1728,30 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
       type: DriftSqlType.string,
       requiredDuringInsert: false,
       defaultValue: const Constant('[]'));
-  static const VerificationMeta _lengthMeta = const VerificationMeta('length');
+  static const VerificationMeta _shortWordsMeta =
+      const VerificationMeta('shortWords');
   @override
-  late final GeneratedColumn<int> length = GeneratedColumn<int>(
-      'length', aliasedName, false,
+  late final GeneratedColumn<int> shortWords = GeneratedColumn<int>(
+      'short_words', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(180));
+  static const VerificationMeta _mediumWordsMeta =
+      const VerificationMeta('mediumWords');
+  @override
+  late final GeneratedColumn<int> mediumWords = GeneratedColumn<int>(
+      'medium_words', aliasedName, false,
       type: DriftSqlType.int,
       requiredDuringInsert: false,
       defaultValue: const Constant(300));
-  static const VerificationMeta _markedMeta = const VerificationMeta('marked');
+  static const VerificationMeta _longWordsMeta =
+      const VerificationMeta('longWords');
   @override
-  late final GeneratedColumn<int> marked = GeneratedColumn<int>(
-      'marked', aliasedName, false,
+  late final GeneratedColumn<int> longWords = GeneratedColumn<int>(
+      'long_words', aliasedName, false,
       type: DriftSqlType.int,
       requiredDuringInsert: false,
-      defaultValue: const Constant(6));
+      defaultValue: const Constant(500));
   static const VerificationMeta _rawMeta = const VerificationMeta('raw');
   @override
   late final GeneratedColumn<String> raw = GeneratedColumn<String>(
@@ -1624,8 +1760,17 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
       requiredDuringInsert: false,
       defaultValue: const Constant(''));
   @override
-  List<GeneratedColumn> get $columns =>
-      [id, reader, topics, style, gloss, avoid, length, marked, raw];
+  List<GeneratedColumn> get $columns => [
+        id,
+        reader,
+        style,
+        gloss,
+        avoid,
+        shortWords,
+        mediumWords,
+        longWords,
+        raw
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -1643,10 +1788,6 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
       context.handle(_readerMeta,
           reader.isAcceptableOrUnknown(data['reader']!, _readerMeta));
     }
-    if (data.containsKey('topics')) {
-      context.handle(_topicsMeta,
-          topics.isAcceptableOrUnknown(data['topics']!, _topicsMeta));
-    }
     if (data.containsKey('style')) {
       context.handle(
           _styleMeta, style.isAcceptableOrUnknown(data['style']!, _styleMeta));
@@ -1659,13 +1800,21 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
       context.handle(
           _avoidMeta, avoid.isAcceptableOrUnknown(data['avoid']!, _avoidMeta));
     }
-    if (data.containsKey('length')) {
-      context.handle(_lengthMeta,
-          length.isAcceptableOrUnknown(data['length']!, _lengthMeta));
+    if (data.containsKey('short_words')) {
+      context.handle(
+          _shortWordsMeta,
+          shortWords.isAcceptableOrUnknown(
+              data['short_words']!, _shortWordsMeta));
     }
-    if (data.containsKey('marked')) {
-      context.handle(_markedMeta,
-          marked.isAcceptableOrUnknown(data['marked']!, _markedMeta));
+    if (data.containsKey('medium_words')) {
+      context.handle(
+          _mediumWordsMeta,
+          mediumWords.isAcceptableOrUnknown(
+              data['medium_words']!, _mediumWordsMeta));
+    }
+    if (data.containsKey('long_words')) {
+      context.handle(_longWordsMeta,
+          longWords.isAcceptableOrUnknown(data['long_words']!, _longWordsMeta));
     }
     if (data.containsKey('raw')) {
       context.handle(
@@ -1684,18 +1833,18 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
           .read(DriftSqlType.int, data['${effectivePrefix}id'])!,
       reader: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}reader'])!,
-      topics: attachedDatabase.typeMapping
-          .read(DriftSqlType.string, data['${effectivePrefix}topics'])!,
       style: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}style'])!,
       gloss: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}gloss'])!,
       avoid: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}avoid'])!,
-      length: attachedDatabase.typeMapping
-          .read(DriftSqlType.int, data['${effectivePrefix}length'])!,
-      marked: attachedDatabase.typeMapping
-          .read(DriftSqlType.int, data['${effectivePrefix}marked'])!,
+      shortWords: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}short_words'])!,
+      mediumWords: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}medium_words'])!,
+      longWords: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}long_words'])!,
       raw: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}raw'])!,
     );
@@ -1710,34 +1859,34 @@ class $PlanRowsTable extends PlanRows with TableInfo<$PlanRowsTable, PlanRow> {
 class PlanRow extends DataClass implements Insertable<PlanRow> {
   final int id;
   final String reader;
-  final String topics;
   final String style;
   final String gloss;
   final String avoid;
-  final int length;
-  final int marked;
+  final int shortWords;
+  final int mediumWords;
+  final int longWords;
   final String raw;
   const PlanRow(
       {required this.id,
       required this.reader,
-      required this.topics,
       required this.style,
       required this.gloss,
       required this.avoid,
-      required this.length,
-      required this.marked,
+      required this.shortWords,
+      required this.mediumWords,
+      required this.longWords,
       required this.raw});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['id'] = Variable<int>(id);
     map['reader'] = Variable<String>(reader);
-    map['topics'] = Variable<String>(topics);
     map['style'] = Variable<String>(style);
     map['gloss'] = Variable<String>(gloss);
     map['avoid'] = Variable<String>(avoid);
-    map['length'] = Variable<int>(length);
-    map['marked'] = Variable<int>(marked);
+    map['short_words'] = Variable<int>(shortWords);
+    map['medium_words'] = Variable<int>(mediumWords);
+    map['long_words'] = Variable<int>(longWords);
     map['raw'] = Variable<String>(raw);
     return map;
   }
@@ -1746,12 +1895,12 @@ class PlanRow extends DataClass implements Insertable<PlanRow> {
     return PlanRowsCompanion(
       id: Value(id),
       reader: Value(reader),
-      topics: Value(topics),
       style: Value(style),
       gloss: Value(gloss),
       avoid: Value(avoid),
-      length: Value(length),
-      marked: Value(marked),
+      shortWords: Value(shortWords),
+      mediumWords: Value(mediumWords),
+      longWords: Value(longWords),
       raw: Value(raw),
     );
   }
@@ -1762,12 +1911,12 @@ class PlanRow extends DataClass implements Insertable<PlanRow> {
     return PlanRow(
       id: serializer.fromJson<int>(json['id']),
       reader: serializer.fromJson<String>(json['reader']),
-      topics: serializer.fromJson<String>(json['topics']),
       style: serializer.fromJson<String>(json['style']),
       gloss: serializer.fromJson<String>(json['gloss']),
       avoid: serializer.fromJson<String>(json['avoid']),
-      length: serializer.fromJson<int>(json['length']),
-      marked: serializer.fromJson<int>(json['marked']),
+      shortWords: serializer.fromJson<int>(json['shortWords']),
+      mediumWords: serializer.fromJson<int>(json['mediumWords']),
+      longWords: serializer.fromJson<int>(json['longWords']),
       raw: serializer.fromJson<String>(json['raw']),
     );
   }
@@ -1777,12 +1926,12 @@ class PlanRow extends DataClass implements Insertable<PlanRow> {
     return <String, dynamic>{
       'id': serializer.toJson<int>(id),
       'reader': serializer.toJson<String>(reader),
-      'topics': serializer.toJson<String>(topics),
       'style': serializer.toJson<String>(style),
       'gloss': serializer.toJson<String>(gloss),
       'avoid': serializer.toJson<String>(avoid),
-      'length': serializer.toJson<int>(length),
-      'marked': serializer.toJson<int>(marked),
+      'shortWords': serializer.toJson<int>(shortWords),
+      'mediumWords': serializer.toJson<int>(mediumWords),
+      'longWords': serializer.toJson<int>(longWords),
       'raw': serializer.toJson<String>(raw),
     };
   }
@@ -1790,34 +1939,36 @@ class PlanRow extends DataClass implements Insertable<PlanRow> {
   PlanRow copyWith(
           {int? id,
           String? reader,
-          String? topics,
           String? style,
           String? gloss,
           String? avoid,
-          int? length,
-          int? marked,
+          int? shortWords,
+          int? mediumWords,
+          int? longWords,
           String? raw}) =>
       PlanRow(
         id: id ?? this.id,
         reader: reader ?? this.reader,
-        topics: topics ?? this.topics,
         style: style ?? this.style,
         gloss: gloss ?? this.gloss,
         avoid: avoid ?? this.avoid,
-        length: length ?? this.length,
-        marked: marked ?? this.marked,
+        shortWords: shortWords ?? this.shortWords,
+        mediumWords: mediumWords ?? this.mediumWords,
+        longWords: longWords ?? this.longWords,
         raw: raw ?? this.raw,
       );
   PlanRow copyWithCompanion(PlanRowsCompanion data) {
     return PlanRow(
       id: data.id.present ? data.id.value : this.id,
       reader: data.reader.present ? data.reader.value : this.reader,
-      topics: data.topics.present ? data.topics.value : this.topics,
       style: data.style.present ? data.style.value : this.style,
       gloss: data.gloss.present ? data.gloss.value : this.gloss,
       avoid: data.avoid.present ? data.avoid.value : this.avoid,
-      length: data.length.present ? data.length.value : this.length,
-      marked: data.marked.present ? data.marked.value : this.marked,
+      shortWords:
+          data.shortWords.present ? data.shortWords.value : this.shortWords,
+      mediumWords:
+          data.mediumWords.present ? data.mediumWords.value : this.mediumWords,
+      longWords: data.longWords.present ? data.longWords.value : this.longWords,
       raw: data.raw.present ? data.raw.value : this.raw,
     );
   }
@@ -1827,87 +1978,87 @@ class PlanRow extends DataClass implements Insertable<PlanRow> {
     return (StringBuffer('PlanRow(')
           ..write('id: $id, ')
           ..write('reader: $reader, ')
-          ..write('topics: $topics, ')
           ..write('style: $style, ')
           ..write('gloss: $gloss, ')
           ..write('avoid: $avoid, ')
-          ..write('length: $length, ')
-          ..write('marked: $marked, ')
+          ..write('shortWords: $shortWords, ')
+          ..write('mediumWords: $mediumWords, ')
+          ..write('longWords: $longWords, ')
           ..write('raw: $raw')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, reader, topics, style, gloss, avoid, length, marked, raw);
+  int get hashCode => Object.hash(
+      id, reader, style, gloss, avoid, shortWords, mediumWords, longWords, raw);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is PlanRow &&
           other.id == this.id &&
           other.reader == this.reader &&
-          other.topics == this.topics &&
           other.style == this.style &&
           other.gloss == this.gloss &&
           other.avoid == this.avoid &&
-          other.length == this.length &&
-          other.marked == this.marked &&
+          other.shortWords == this.shortWords &&
+          other.mediumWords == this.mediumWords &&
+          other.longWords == this.longWords &&
           other.raw == this.raw);
 }
 
 class PlanRowsCompanion extends UpdateCompanion<PlanRow> {
   final Value<int> id;
   final Value<String> reader;
-  final Value<String> topics;
   final Value<String> style;
   final Value<String> gloss;
   final Value<String> avoid;
-  final Value<int> length;
-  final Value<int> marked;
+  final Value<int> shortWords;
+  final Value<int> mediumWords;
+  final Value<int> longWords;
   final Value<String> raw;
   const PlanRowsCompanion({
     this.id = const Value.absent(),
     this.reader = const Value.absent(),
-    this.topics = const Value.absent(),
     this.style = const Value.absent(),
     this.gloss = const Value.absent(),
     this.avoid = const Value.absent(),
-    this.length = const Value.absent(),
-    this.marked = const Value.absent(),
+    this.shortWords = const Value.absent(),
+    this.mediumWords = const Value.absent(),
+    this.longWords = const Value.absent(),
     this.raw = const Value.absent(),
   });
   PlanRowsCompanion.insert({
     this.id = const Value.absent(),
     this.reader = const Value.absent(),
-    this.topics = const Value.absent(),
     this.style = const Value.absent(),
     this.gloss = const Value.absent(),
     this.avoid = const Value.absent(),
-    this.length = const Value.absent(),
-    this.marked = const Value.absent(),
+    this.shortWords = const Value.absent(),
+    this.mediumWords = const Value.absent(),
+    this.longWords = const Value.absent(),
     this.raw = const Value.absent(),
   });
   static Insertable<PlanRow> custom({
     Expression<int>? id,
     Expression<String>? reader,
-    Expression<String>? topics,
     Expression<String>? style,
     Expression<String>? gloss,
     Expression<String>? avoid,
-    Expression<int>? length,
-    Expression<int>? marked,
+    Expression<int>? shortWords,
+    Expression<int>? mediumWords,
+    Expression<int>? longWords,
     Expression<String>? raw,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
       if (reader != null) 'reader': reader,
-      if (topics != null) 'topics': topics,
       if (style != null) 'style': style,
       if (gloss != null) 'gloss': gloss,
       if (avoid != null) 'avoid': avoid,
-      if (length != null) 'length': length,
-      if (marked != null) 'marked': marked,
+      if (shortWords != null) 'short_words': shortWords,
+      if (mediumWords != null) 'medium_words': mediumWords,
+      if (longWords != null) 'long_words': longWords,
       if (raw != null) 'raw': raw,
     });
   }
@@ -1915,22 +2066,22 @@ class PlanRowsCompanion extends UpdateCompanion<PlanRow> {
   PlanRowsCompanion copyWith(
       {Value<int>? id,
       Value<String>? reader,
-      Value<String>? topics,
       Value<String>? style,
       Value<String>? gloss,
       Value<String>? avoid,
-      Value<int>? length,
-      Value<int>? marked,
+      Value<int>? shortWords,
+      Value<int>? mediumWords,
+      Value<int>? longWords,
       Value<String>? raw}) {
     return PlanRowsCompanion(
       id: id ?? this.id,
       reader: reader ?? this.reader,
-      topics: topics ?? this.topics,
       style: style ?? this.style,
       gloss: gloss ?? this.gloss,
       avoid: avoid ?? this.avoid,
-      length: length ?? this.length,
-      marked: marked ?? this.marked,
+      shortWords: shortWords ?? this.shortWords,
+      mediumWords: mediumWords ?? this.mediumWords,
+      longWords: longWords ?? this.longWords,
       raw: raw ?? this.raw,
     );
   }
@@ -1944,9 +2095,6 @@ class PlanRowsCompanion extends UpdateCompanion<PlanRow> {
     if (reader.present) {
       map['reader'] = Variable<String>(reader.value);
     }
-    if (topics.present) {
-      map['topics'] = Variable<String>(topics.value);
-    }
     if (style.present) {
       map['style'] = Variable<String>(style.value);
     }
@@ -1956,11 +2104,14 @@ class PlanRowsCompanion extends UpdateCompanion<PlanRow> {
     if (avoid.present) {
       map['avoid'] = Variable<String>(avoid.value);
     }
-    if (length.present) {
-      map['length'] = Variable<int>(length.value);
+    if (shortWords.present) {
+      map['short_words'] = Variable<int>(shortWords.value);
     }
-    if (marked.present) {
-      map['marked'] = Variable<int>(marked.value);
+    if (mediumWords.present) {
+      map['medium_words'] = Variable<int>(mediumWords.value);
+    }
+    if (longWords.present) {
+      map['long_words'] = Variable<int>(longWords.value);
     }
     if (raw.present) {
       map['raw'] = Variable<String>(raw.value);
@@ -1973,13 +2124,773 @@ class PlanRowsCompanion extends UpdateCompanion<PlanRow> {
     return (StringBuffer('PlanRowsCompanion(')
           ..write('id: $id, ')
           ..write('reader: $reader, ')
-          ..write('topics: $topics, ')
           ..write('style: $style, ')
           ..write('gloss: $gloss, ')
           ..write('avoid: $avoid, ')
-          ..write('length: $length, ')
-          ..write('marked: $marked, ')
+          ..write('shortWords: $shortWords, ')
+          ..write('mediumWords: $mediumWords, ')
+          ..write('longWords: $longWords, ')
           ..write('raw: $raw')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $InstructionRowsTable extends InstructionRows
+    with TableInfo<$InstructionRowsTable, InstructionRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $InstructionRowsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+      'id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _instructionTextMeta =
+      const VerificationMeta('instructionText');
+  @override
+  late final GeneratedColumn<String> instructionText = GeneratedColumn<String>(
+      'instruction_text', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _createdDayMeta =
+      const VerificationMeta('createdDay');
+  @override
+  late final GeneratedColumn<String> createdDay = GeneratedColumn<String>(
+      'created_day', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _lastUsedDayMeta =
+      const VerificationMeta('lastUsedDay');
+  @override
+  late final GeneratedColumn<String> lastUsedDay = GeneratedColumn<String>(
+      'last_used_day', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _useCountMeta =
+      const VerificationMeta('useCount');
+  @override
+  late final GeneratedColumn<int> useCount = GeneratedColumn<int>(
+      'use_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  @override
+  List<GeneratedColumn> get $columns =>
+      [id, instructionText, createdDay, lastUsedDay, useCount];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'instruction_rows';
+  @override
+  VerificationContext validateIntegrity(Insertable<InstructionRow> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('instruction_text')) {
+      context.handle(
+          _instructionTextMeta,
+          instructionText.isAcceptableOrUnknown(
+              data['instruction_text']!, _instructionTextMeta));
+    } else if (isInserting) {
+      context.missing(_instructionTextMeta);
+    }
+    if (data.containsKey('created_day')) {
+      context.handle(
+          _createdDayMeta,
+          createdDay.isAcceptableOrUnknown(
+              data['created_day']!, _createdDayMeta));
+    } else if (isInserting) {
+      context.missing(_createdDayMeta);
+    }
+    if (data.containsKey('last_used_day')) {
+      context.handle(
+          _lastUsedDayMeta,
+          lastUsedDay.isAcceptableOrUnknown(
+              data['last_used_day']!, _lastUsedDayMeta));
+    }
+    if (data.containsKey('use_count')) {
+      context.handle(_useCountMeta,
+          useCount.isAcceptableOrUnknown(data['use_count']!, _useCountMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  InstructionRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return InstructionRow(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
+      instructionText: attachedDatabase.typeMapping.read(
+          DriftSqlType.string, data['${effectivePrefix}instruction_text'])!,
+      createdDay: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}created_day'])!,
+      lastUsedDay: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}last_used_day']),
+      useCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}use_count'])!,
+    );
+  }
+
+  @override
+  $InstructionRowsTable createAlias(String alias) {
+    return $InstructionRowsTable(attachedDatabase, alias);
+  }
+}
+
+class InstructionRow extends DataClass implements Insertable<InstructionRow> {
+  final String id;
+
+  /// Named `instructionText` and not `text`, because `text` is a METHOD on
+  /// drift's `Table` — a column of that name does not compile, and the failure
+  /// mode is that the whole table silently fails to generate.
+  final String instructionText;
+
+  /// `YYYY-MM-DD`, the same day format the ledger uses — a string rather than a
+  /// timestamp so a stored row never shifts when the device timezone does.
+  final String createdDay;
+
+  /// Null until it has actually been used to write something.
+  final String? lastUsedDay;
+  final int useCount;
+  const InstructionRow(
+      {required this.id,
+      required this.instructionText,
+      required this.createdDay,
+      this.lastUsedDay,
+      required this.useCount});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['instruction_text'] = Variable<String>(instructionText);
+    map['created_day'] = Variable<String>(createdDay);
+    if (!nullToAbsent || lastUsedDay != null) {
+      map['last_used_day'] = Variable<String>(lastUsedDay);
+    }
+    map['use_count'] = Variable<int>(useCount);
+    return map;
+  }
+
+  InstructionRowsCompanion toCompanion(bool nullToAbsent) {
+    return InstructionRowsCompanion(
+      id: Value(id),
+      instructionText: Value(instructionText),
+      createdDay: Value(createdDay),
+      lastUsedDay: lastUsedDay == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastUsedDay),
+      useCount: Value(useCount),
+    );
+  }
+
+  factory InstructionRow.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return InstructionRow(
+      id: serializer.fromJson<String>(json['id']),
+      instructionText: serializer.fromJson<String>(json['instructionText']),
+      createdDay: serializer.fromJson<String>(json['createdDay']),
+      lastUsedDay: serializer.fromJson<String?>(json['lastUsedDay']),
+      useCount: serializer.fromJson<int>(json['useCount']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'instructionText': serializer.toJson<String>(instructionText),
+      'createdDay': serializer.toJson<String>(createdDay),
+      'lastUsedDay': serializer.toJson<String?>(lastUsedDay),
+      'useCount': serializer.toJson<int>(useCount),
+    };
+  }
+
+  InstructionRow copyWith(
+          {String? id,
+          String? instructionText,
+          String? createdDay,
+          Value<String?> lastUsedDay = const Value.absent(),
+          int? useCount}) =>
+      InstructionRow(
+        id: id ?? this.id,
+        instructionText: instructionText ?? this.instructionText,
+        createdDay: createdDay ?? this.createdDay,
+        lastUsedDay: lastUsedDay.present ? lastUsedDay.value : this.lastUsedDay,
+        useCount: useCount ?? this.useCount,
+      );
+  InstructionRow copyWithCompanion(InstructionRowsCompanion data) {
+    return InstructionRow(
+      id: data.id.present ? data.id.value : this.id,
+      instructionText: data.instructionText.present
+          ? data.instructionText.value
+          : this.instructionText,
+      createdDay:
+          data.createdDay.present ? data.createdDay.value : this.createdDay,
+      lastUsedDay:
+          data.lastUsedDay.present ? data.lastUsedDay.value : this.lastUsedDay,
+      useCount: data.useCount.present ? data.useCount.value : this.useCount,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('InstructionRow(')
+          ..write('id: $id, ')
+          ..write('instructionText: $instructionText, ')
+          ..write('createdDay: $createdDay, ')
+          ..write('lastUsedDay: $lastUsedDay, ')
+          ..write('useCount: $useCount')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(id, instructionText, createdDay, lastUsedDay, useCount);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is InstructionRow &&
+          other.id == this.id &&
+          other.instructionText == this.instructionText &&
+          other.createdDay == this.createdDay &&
+          other.lastUsedDay == this.lastUsedDay &&
+          other.useCount == this.useCount);
+}
+
+class InstructionRowsCompanion extends UpdateCompanion<InstructionRow> {
+  final Value<String> id;
+  final Value<String> instructionText;
+  final Value<String> createdDay;
+  final Value<String?> lastUsedDay;
+  final Value<int> useCount;
+  final Value<int> rowid;
+  const InstructionRowsCompanion({
+    this.id = const Value.absent(),
+    this.instructionText = const Value.absent(),
+    this.createdDay = const Value.absent(),
+    this.lastUsedDay = const Value.absent(),
+    this.useCount = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  InstructionRowsCompanion.insert({
+    required String id,
+    required String instructionText,
+    required String createdDay,
+    this.lastUsedDay = const Value.absent(),
+    this.useCount = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        instructionText = Value(instructionText),
+        createdDay = Value(createdDay);
+  static Insertable<InstructionRow> custom({
+    Expression<String>? id,
+    Expression<String>? instructionText,
+    Expression<String>? createdDay,
+    Expression<String>? lastUsedDay,
+    Expression<int>? useCount,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (instructionText != null) 'instruction_text': instructionText,
+      if (createdDay != null) 'created_day': createdDay,
+      if (lastUsedDay != null) 'last_used_day': lastUsedDay,
+      if (useCount != null) 'use_count': useCount,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  InstructionRowsCompanion copyWith(
+      {Value<String>? id,
+      Value<String>? instructionText,
+      Value<String>? createdDay,
+      Value<String?>? lastUsedDay,
+      Value<int>? useCount,
+      Value<int>? rowid}) {
+    return InstructionRowsCompanion(
+      id: id ?? this.id,
+      instructionText: instructionText ?? this.instructionText,
+      createdDay: createdDay ?? this.createdDay,
+      lastUsedDay: lastUsedDay ?? this.lastUsedDay,
+      useCount: useCount ?? this.useCount,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (instructionText.present) {
+      map['instruction_text'] = Variable<String>(instructionText.value);
+    }
+    if (createdDay.present) {
+      map['created_day'] = Variable<String>(createdDay.value);
+    }
+    if (lastUsedDay.present) {
+      map['last_used_day'] = Variable<String>(lastUsedDay.value);
+    }
+    if (useCount.present) {
+      map['use_count'] = Variable<int>(useCount.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('InstructionRowsCompanion(')
+          ..write('id: $id, ')
+          ..write('instructionText: $instructionText, ')
+          ..write('createdDay: $createdDay, ')
+          ..write('lastUsedDay: $lastUsedDay, ')
+          ..write('useCount: $useCount, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $ArticleRowsTable extends ArticleRows
+    with TableInfo<$ArticleRowsTable, ArticleRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ArticleRowsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _articleIdMeta =
+      const VerificationMeta('articleId');
+  @override
+  late final GeneratedColumn<String> articleId = GeneratedColumn<String>(
+      'article_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+      'title', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _keywordsMeta =
+      const VerificationMeta('keywords');
+  @override
+  late final GeneratedColumn<String> keywords = GeneratedColumn<String>(
+      'keywords', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant('[]'));
+  static const VerificationMeta _sentencesMeta =
+      const VerificationMeta('sentences');
+  @override
+  late final GeneratedColumn<String> sentences = GeneratedColumn<String>(
+      'sentences', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _marksMeta = const VerificationMeta('marks');
+  @override
+  late final GeneratedColumn<String> marks = GeneratedColumn<String>(
+      'marks', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _wordCountMeta =
+      const VerificationMeta('wordCount');
+  @override
+  late final GeneratedColumn<int> wordCount = GeneratedColumn<int>(
+      'word_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _minuteEstimateMeta =
+      const VerificationMeta('minuteEstimate');
+  @override
+  late final GeneratedColumn<int> minuteEstimate = GeneratedColumn<int>(
+      'minute_estimate', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _bytesMeta = const VerificationMeta('bytes');
+  @override
+  late final GeneratedColumn<int> bytes = GeneratedColumn<int>(
+      'bytes', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  @override
+  List<GeneratedColumn> get $columns => [
+        articleId,
+        title,
+        keywords,
+        sentences,
+        marks,
+        wordCount,
+        minuteEstimate,
+        bytes
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'article_rows';
+  @override
+  VerificationContext validateIntegrity(Insertable<ArticleRow> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('article_id')) {
+      context.handle(_articleIdMeta,
+          articleId.isAcceptableOrUnknown(data['article_id']!, _articleIdMeta));
+    } else if (isInserting) {
+      context.missing(_articleIdMeta);
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+          _titleMeta, title.isAcceptableOrUnknown(data['title']!, _titleMeta));
+    } else if (isInserting) {
+      context.missing(_titleMeta);
+    }
+    if (data.containsKey('keywords')) {
+      context.handle(_keywordsMeta,
+          keywords.isAcceptableOrUnknown(data['keywords']!, _keywordsMeta));
+    }
+    if (data.containsKey('sentences')) {
+      context.handle(_sentencesMeta,
+          sentences.isAcceptableOrUnknown(data['sentences']!, _sentencesMeta));
+    } else if (isInserting) {
+      context.missing(_sentencesMeta);
+    }
+    if (data.containsKey('marks')) {
+      context.handle(
+          _marksMeta, marks.isAcceptableOrUnknown(data['marks']!, _marksMeta));
+    } else if (isInserting) {
+      context.missing(_marksMeta);
+    }
+    if (data.containsKey('word_count')) {
+      context.handle(_wordCountMeta,
+          wordCount.isAcceptableOrUnknown(data['word_count']!, _wordCountMeta));
+    }
+    if (data.containsKey('minute_estimate')) {
+      context.handle(
+          _minuteEstimateMeta,
+          minuteEstimate.isAcceptableOrUnknown(
+              data['minute_estimate']!, _minuteEstimateMeta));
+    }
+    if (data.containsKey('bytes')) {
+      context.handle(
+          _bytesMeta, bytes.isAcceptableOrUnknown(data['bytes']!, _bytesMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {articleId};
+  @override
+  ArticleRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ArticleRow(
+      articleId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}article_id'])!,
+      title: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}title'])!,
+      keywords: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}keywords'])!,
+      sentences: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}sentences'])!,
+      marks: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}marks'])!,
+      wordCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}word_count'])!,
+      minuteEstimate: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}minute_estimate'])!,
+      bytes: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}bytes'])!,
+    );
+  }
+
+  @override
+  $ArticleRowsTable createAlias(String alias) {
+    return $ArticleRowsTable(attachedDatabase, alias);
+  }
+}
+
+class ArticleRow extends DataClass implements Insertable<ArticleRow> {
+  final String articleId;
+  final String title;
+  final String keywords;
+  final String sentences;
+  final String marks;
+  final int wordCount;
+  final int minuteEstimate;
+
+  /// Real bytes on disk: the length of the three json columns plus the audio
+  /// files cached for this article. Replaces the invented figure.
+  final int bytes;
+  const ArticleRow(
+      {required this.articleId,
+      required this.title,
+      required this.keywords,
+      required this.sentences,
+      required this.marks,
+      required this.wordCount,
+      required this.minuteEstimate,
+      required this.bytes});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['article_id'] = Variable<String>(articleId);
+    map['title'] = Variable<String>(title);
+    map['keywords'] = Variable<String>(keywords);
+    map['sentences'] = Variable<String>(sentences);
+    map['marks'] = Variable<String>(marks);
+    map['word_count'] = Variable<int>(wordCount);
+    map['minute_estimate'] = Variable<int>(minuteEstimate);
+    map['bytes'] = Variable<int>(bytes);
+    return map;
+  }
+
+  ArticleRowsCompanion toCompanion(bool nullToAbsent) {
+    return ArticleRowsCompanion(
+      articleId: Value(articleId),
+      title: Value(title),
+      keywords: Value(keywords),
+      sentences: Value(sentences),
+      marks: Value(marks),
+      wordCount: Value(wordCount),
+      minuteEstimate: Value(minuteEstimate),
+      bytes: Value(bytes),
+    );
+  }
+
+  factory ArticleRow.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ArticleRow(
+      articleId: serializer.fromJson<String>(json['articleId']),
+      title: serializer.fromJson<String>(json['title']),
+      keywords: serializer.fromJson<String>(json['keywords']),
+      sentences: serializer.fromJson<String>(json['sentences']),
+      marks: serializer.fromJson<String>(json['marks']),
+      wordCount: serializer.fromJson<int>(json['wordCount']),
+      minuteEstimate: serializer.fromJson<int>(json['minuteEstimate']),
+      bytes: serializer.fromJson<int>(json['bytes']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'articleId': serializer.toJson<String>(articleId),
+      'title': serializer.toJson<String>(title),
+      'keywords': serializer.toJson<String>(keywords),
+      'sentences': serializer.toJson<String>(sentences),
+      'marks': serializer.toJson<String>(marks),
+      'wordCount': serializer.toJson<int>(wordCount),
+      'minuteEstimate': serializer.toJson<int>(minuteEstimate),
+      'bytes': serializer.toJson<int>(bytes),
+    };
+  }
+
+  ArticleRow copyWith(
+          {String? articleId,
+          String? title,
+          String? keywords,
+          String? sentences,
+          String? marks,
+          int? wordCount,
+          int? minuteEstimate,
+          int? bytes}) =>
+      ArticleRow(
+        articleId: articleId ?? this.articleId,
+        title: title ?? this.title,
+        keywords: keywords ?? this.keywords,
+        sentences: sentences ?? this.sentences,
+        marks: marks ?? this.marks,
+        wordCount: wordCount ?? this.wordCount,
+        minuteEstimate: minuteEstimate ?? this.minuteEstimate,
+        bytes: bytes ?? this.bytes,
+      );
+  ArticleRow copyWithCompanion(ArticleRowsCompanion data) {
+    return ArticleRow(
+      articleId: data.articleId.present ? data.articleId.value : this.articleId,
+      title: data.title.present ? data.title.value : this.title,
+      keywords: data.keywords.present ? data.keywords.value : this.keywords,
+      sentences: data.sentences.present ? data.sentences.value : this.sentences,
+      marks: data.marks.present ? data.marks.value : this.marks,
+      wordCount: data.wordCount.present ? data.wordCount.value : this.wordCount,
+      minuteEstimate: data.minuteEstimate.present
+          ? data.minuteEstimate.value
+          : this.minuteEstimate,
+      bytes: data.bytes.present ? data.bytes.value : this.bytes,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ArticleRow(')
+          ..write('articleId: $articleId, ')
+          ..write('title: $title, ')
+          ..write('keywords: $keywords, ')
+          ..write('sentences: $sentences, ')
+          ..write('marks: $marks, ')
+          ..write('wordCount: $wordCount, ')
+          ..write('minuteEstimate: $minuteEstimate, ')
+          ..write('bytes: $bytes')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(articleId, title, keywords, sentences, marks,
+      wordCount, minuteEstimate, bytes);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ArticleRow &&
+          other.articleId == this.articleId &&
+          other.title == this.title &&
+          other.keywords == this.keywords &&
+          other.sentences == this.sentences &&
+          other.marks == this.marks &&
+          other.wordCount == this.wordCount &&
+          other.minuteEstimate == this.minuteEstimate &&
+          other.bytes == this.bytes);
+}
+
+class ArticleRowsCompanion extends UpdateCompanion<ArticleRow> {
+  final Value<String> articleId;
+  final Value<String> title;
+  final Value<String> keywords;
+  final Value<String> sentences;
+  final Value<String> marks;
+  final Value<int> wordCount;
+  final Value<int> minuteEstimate;
+  final Value<int> bytes;
+  final Value<int> rowid;
+  const ArticleRowsCompanion({
+    this.articleId = const Value.absent(),
+    this.title = const Value.absent(),
+    this.keywords = const Value.absent(),
+    this.sentences = const Value.absent(),
+    this.marks = const Value.absent(),
+    this.wordCount = const Value.absent(),
+    this.minuteEstimate = const Value.absent(),
+    this.bytes = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ArticleRowsCompanion.insert({
+    required String articleId,
+    required String title,
+    this.keywords = const Value.absent(),
+    required String sentences,
+    required String marks,
+    this.wordCount = const Value.absent(),
+    this.minuteEstimate = const Value.absent(),
+    this.bytes = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : articleId = Value(articleId),
+        title = Value(title),
+        sentences = Value(sentences),
+        marks = Value(marks);
+  static Insertable<ArticleRow> custom({
+    Expression<String>? articleId,
+    Expression<String>? title,
+    Expression<String>? keywords,
+    Expression<String>? sentences,
+    Expression<String>? marks,
+    Expression<int>? wordCount,
+    Expression<int>? minuteEstimate,
+    Expression<int>? bytes,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (articleId != null) 'article_id': articleId,
+      if (title != null) 'title': title,
+      if (keywords != null) 'keywords': keywords,
+      if (sentences != null) 'sentences': sentences,
+      if (marks != null) 'marks': marks,
+      if (wordCount != null) 'word_count': wordCount,
+      if (minuteEstimate != null) 'minute_estimate': minuteEstimate,
+      if (bytes != null) 'bytes': bytes,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ArticleRowsCompanion copyWith(
+      {Value<String>? articleId,
+      Value<String>? title,
+      Value<String>? keywords,
+      Value<String>? sentences,
+      Value<String>? marks,
+      Value<int>? wordCount,
+      Value<int>? minuteEstimate,
+      Value<int>? bytes,
+      Value<int>? rowid}) {
+    return ArticleRowsCompanion(
+      articleId: articleId ?? this.articleId,
+      title: title ?? this.title,
+      keywords: keywords ?? this.keywords,
+      sentences: sentences ?? this.sentences,
+      marks: marks ?? this.marks,
+      wordCount: wordCount ?? this.wordCount,
+      minuteEstimate: minuteEstimate ?? this.minuteEstimate,
+      bytes: bytes ?? this.bytes,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (articleId.present) {
+      map['article_id'] = Variable<String>(articleId.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (keywords.present) {
+      map['keywords'] = Variable<String>(keywords.value);
+    }
+    if (sentences.present) {
+      map['sentences'] = Variable<String>(sentences.value);
+    }
+    if (marks.present) {
+      map['marks'] = Variable<String>(marks.value);
+    }
+    if (wordCount.present) {
+      map['word_count'] = Variable<int>(wordCount.value);
+    }
+    if (minuteEstimate.present) {
+      map['minute_estimate'] = Variable<int>(minuteEstimate.value);
+    }
+    if (bytes.present) {
+      map['bytes'] = Variable<int>(bytes.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ArticleRowsCompanion(')
+          ..write('articleId: $articleId, ')
+          ..write('title: $title, ')
+          ..write('keywords: $keywords, ')
+          ..write('sentences: $sentences, ')
+          ..write('marks: $marks, ')
+          ..write('wordCount: $wordCount, ')
+          ..write('minuteEstimate: $minuteEstimate, ')
+          ..write('bytes: $bytes, ')
+          ..write('rowid: $rowid')
           ..write(')'))
         .toString();
   }
@@ -2434,6 +3345,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $DayLogRowsTable dayLogRows = $DayLogRowsTable(this);
   late final $WordRowsTable wordRows = $WordRowsTable(this);
   late final $PlanRowsTable planRows = $PlanRowsTable(this);
+  late final $InstructionRowsTable instructionRows =
+      $InstructionRowsTable(this);
+  late final $ArticleRowsTable articleRows = $ArticleRowsTable(this);
   late final $PresetRowsTable presetRows = $PresetRowsTable(this);
   late final $SettingsRowsTable settingsRows = $SettingsRowsTable(this);
   @override
@@ -2446,6 +3360,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         dayLogRows,
         wordRows,
         planRows,
+        instructionRows,
+        articleRows,
         presetRows,
         settingsRows
       ];
@@ -2455,10 +3371,10 @@ typedef $$QueueRowsTableCreateCompanionBuilder = QueueRowsCompanion Function({
   Value<int> id,
   required String articleId,
   required String state,
-  Value<String> topic,
-  Value<String> focus,
+  Value<String> instruction,
+  Value<String?> instructionId,
   Value<int> plannedWords,
-  Value<int> plannedMarked,
+  Value<String> plannedBand,
   Value<bool> isWriting,
   required int position,
 });
@@ -2466,10 +3382,10 @@ typedef $$QueueRowsTableUpdateCompanionBuilder = QueueRowsCompanion Function({
   Value<int> id,
   Value<String> articleId,
   Value<String> state,
-  Value<String> topic,
-  Value<String> focus,
+  Value<String> instruction,
+  Value<String?> instructionId,
   Value<int> plannedWords,
-  Value<int> plannedMarked,
+  Value<String> plannedBand,
   Value<bool> isWriting,
   Value<int> position,
 });
@@ -2492,17 +3408,17 @@ class $$QueueRowsTableFilterComposer
   ColumnFilters<String> get state => $composableBuilder(
       column: $table.state, builder: (column) => ColumnFilters(column));
 
-  ColumnFilters<String> get topic => $composableBuilder(
-      column: $table.topic, builder: (column) => ColumnFilters(column));
+  ColumnFilters<String> get instruction => $composableBuilder(
+      column: $table.instruction, builder: (column) => ColumnFilters(column));
 
-  ColumnFilters<String> get focus => $composableBuilder(
-      column: $table.focus, builder: (column) => ColumnFilters(column));
+  ColumnFilters<String> get instructionId => $composableBuilder(
+      column: $table.instructionId, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<int> get plannedWords => $composableBuilder(
       column: $table.plannedWords, builder: (column) => ColumnFilters(column));
 
-  ColumnFilters<int> get plannedMarked => $composableBuilder(
-      column: $table.plannedMarked, builder: (column) => ColumnFilters(column));
+  ColumnFilters<String> get plannedBand => $composableBuilder(
+      column: $table.plannedBand, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<bool> get isWriting => $composableBuilder(
       column: $table.isWriting, builder: (column) => ColumnFilters(column));
@@ -2529,19 +3445,19 @@ class $$QueueRowsTableOrderingComposer
   ColumnOrderings<String> get state => $composableBuilder(
       column: $table.state, builder: (column) => ColumnOrderings(column));
 
-  ColumnOrderings<String> get topic => $composableBuilder(
-      column: $table.topic, builder: (column) => ColumnOrderings(column));
+  ColumnOrderings<String> get instruction => $composableBuilder(
+      column: $table.instruction, builder: (column) => ColumnOrderings(column));
 
-  ColumnOrderings<String> get focus => $composableBuilder(
-      column: $table.focus, builder: (column) => ColumnOrderings(column));
+  ColumnOrderings<String> get instructionId => $composableBuilder(
+      column: $table.instructionId,
+      builder: (column) => ColumnOrderings(column));
 
   ColumnOrderings<int> get plannedWords => $composableBuilder(
       column: $table.plannedWords,
       builder: (column) => ColumnOrderings(column));
 
-  ColumnOrderings<int> get plannedMarked => $composableBuilder(
-      column: $table.plannedMarked,
-      builder: (column) => ColumnOrderings(column));
+  ColumnOrderings<String> get plannedBand => $composableBuilder(
+      column: $table.plannedBand, builder: (column) => ColumnOrderings(column));
 
   ColumnOrderings<bool> get isWriting => $composableBuilder(
       column: $table.isWriting, builder: (column) => ColumnOrderings(column));
@@ -2568,17 +3484,17 @@ class $$QueueRowsTableAnnotationComposer
   GeneratedColumn<String> get state =>
       $composableBuilder(column: $table.state, builder: (column) => column);
 
-  GeneratedColumn<String> get topic =>
-      $composableBuilder(column: $table.topic, builder: (column) => column);
+  GeneratedColumn<String> get instruction => $composableBuilder(
+      column: $table.instruction, builder: (column) => column);
 
-  GeneratedColumn<String> get focus =>
-      $composableBuilder(column: $table.focus, builder: (column) => column);
+  GeneratedColumn<String> get instructionId => $composableBuilder(
+      column: $table.instructionId, builder: (column) => column);
 
   GeneratedColumn<int> get plannedWords => $composableBuilder(
       column: $table.plannedWords, builder: (column) => column);
 
-  GeneratedColumn<int> get plannedMarked => $composableBuilder(
-      column: $table.plannedMarked, builder: (column) => column);
+  GeneratedColumn<String> get plannedBand => $composableBuilder(
+      column: $table.plannedBand, builder: (column) => column);
 
   GeneratedColumn<bool> get isWriting =>
       $composableBuilder(column: $table.isWriting, builder: (column) => column);
@@ -2613,10 +3529,10 @@ class $$QueueRowsTableTableManager extends RootTableManager<
             Value<int> id = const Value.absent(),
             Value<String> articleId = const Value.absent(),
             Value<String> state = const Value.absent(),
-            Value<String> topic = const Value.absent(),
-            Value<String> focus = const Value.absent(),
+            Value<String> instruction = const Value.absent(),
+            Value<String?> instructionId = const Value.absent(),
             Value<int> plannedWords = const Value.absent(),
-            Value<int> plannedMarked = const Value.absent(),
+            Value<String> plannedBand = const Value.absent(),
             Value<bool> isWriting = const Value.absent(),
             Value<int> position = const Value.absent(),
           }) =>
@@ -2624,10 +3540,10 @@ class $$QueueRowsTableTableManager extends RootTableManager<
             id: id,
             articleId: articleId,
             state: state,
-            topic: topic,
-            focus: focus,
+            instruction: instruction,
+            instructionId: instructionId,
             plannedWords: plannedWords,
-            plannedMarked: plannedMarked,
+            plannedBand: plannedBand,
             isWriting: isWriting,
             position: position,
           ),
@@ -2635,10 +3551,10 @@ class $$QueueRowsTableTableManager extends RootTableManager<
             Value<int> id = const Value.absent(),
             required String articleId,
             required String state,
-            Value<String> topic = const Value.absent(),
-            Value<String> focus = const Value.absent(),
+            Value<String> instruction = const Value.absent(),
+            Value<String?> instructionId = const Value.absent(),
             Value<int> plannedWords = const Value.absent(),
-            Value<int> plannedMarked = const Value.absent(),
+            Value<String> plannedBand = const Value.absent(),
             Value<bool> isWriting = const Value.absent(),
             required int position,
           }) =>
@@ -2646,10 +3562,10 @@ class $$QueueRowsTableTableManager extends RootTableManager<
             id: id,
             articleId: articleId,
             state: state,
-            topic: topic,
-            focus: focus,
+            instruction: instruction,
+            instructionId: instructionId,
             plannedWords: plannedWords,
-            plannedMarked: plannedMarked,
+            plannedBand: plannedBand,
             isWriting: isWriting,
             position: position,
           ),
@@ -2676,22 +3592,26 @@ typedef $$LedgerRowsTableCreateCompanionBuilder = LedgerRowsCompanion Function({
   required String articleId,
   required String title,
   Value<String> topic,
+  Value<String> keywords,
   Value<int> reads,
   Value<int> listens,
   Value<int> kilobytes,
   Value<int> freedKilobytes,
   Value<String?> goneReason,
+  Value<String> lastSeenDay,
   Value<int> rowid,
 });
 typedef $$LedgerRowsTableUpdateCompanionBuilder = LedgerRowsCompanion Function({
   Value<String> articleId,
   Value<String> title,
   Value<String> topic,
+  Value<String> keywords,
   Value<int> reads,
   Value<int> listens,
   Value<int> kilobytes,
   Value<int> freedKilobytes,
   Value<String?> goneReason,
+  Value<String> lastSeenDay,
   Value<int> rowid,
 });
 
@@ -2713,6 +3633,9 @@ class $$LedgerRowsTableFilterComposer
   ColumnFilters<String> get topic => $composableBuilder(
       column: $table.topic, builder: (column) => ColumnFilters(column));
 
+  ColumnFilters<String> get keywords => $composableBuilder(
+      column: $table.keywords, builder: (column) => ColumnFilters(column));
+
   ColumnFilters<int> get reads => $composableBuilder(
       column: $table.reads, builder: (column) => ColumnFilters(column));
 
@@ -2728,6 +3651,9 @@ class $$LedgerRowsTableFilterComposer
 
   ColumnFilters<String> get goneReason => $composableBuilder(
       column: $table.goneReason, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get lastSeenDay => $composableBuilder(
+      column: $table.lastSeenDay, builder: (column) => ColumnFilters(column));
 }
 
 class $$LedgerRowsTableOrderingComposer
@@ -2748,6 +3674,9 @@ class $$LedgerRowsTableOrderingComposer
   ColumnOrderings<String> get topic => $composableBuilder(
       column: $table.topic, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<String> get keywords => $composableBuilder(
+      column: $table.keywords, builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<int> get reads => $composableBuilder(
       column: $table.reads, builder: (column) => ColumnOrderings(column));
 
@@ -2763,6 +3692,9 @@ class $$LedgerRowsTableOrderingComposer
 
   ColumnOrderings<String> get goneReason => $composableBuilder(
       column: $table.goneReason, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get lastSeenDay => $composableBuilder(
+      column: $table.lastSeenDay, builder: (column) => ColumnOrderings(column));
 }
 
 class $$LedgerRowsTableAnnotationComposer
@@ -2783,6 +3715,9 @@ class $$LedgerRowsTableAnnotationComposer
   GeneratedColumn<String> get topic =>
       $composableBuilder(column: $table.topic, builder: (column) => column);
 
+  GeneratedColumn<String> get keywords =>
+      $composableBuilder(column: $table.keywords, builder: (column) => column);
+
   GeneratedColumn<int> get reads =>
       $composableBuilder(column: $table.reads, builder: (column) => column);
 
@@ -2797,6 +3732,9 @@ class $$LedgerRowsTableAnnotationComposer
 
   GeneratedColumn<String> get goneReason => $composableBuilder(
       column: $table.goneReason, builder: (column) => column);
+
+  GeneratedColumn<String> get lastSeenDay => $composableBuilder(
+      column: $table.lastSeenDay, builder: (column) => column);
 }
 
 class $$LedgerRowsTableTableManager extends RootTableManager<
@@ -2825,44 +3763,52 @@ class $$LedgerRowsTableTableManager extends RootTableManager<
             Value<String> articleId = const Value.absent(),
             Value<String> title = const Value.absent(),
             Value<String> topic = const Value.absent(),
+            Value<String> keywords = const Value.absent(),
             Value<int> reads = const Value.absent(),
             Value<int> listens = const Value.absent(),
             Value<int> kilobytes = const Value.absent(),
             Value<int> freedKilobytes = const Value.absent(),
             Value<String?> goneReason = const Value.absent(),
+            Value<String> lastSeenDay = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               LedgerRowsCompanion(
             articleId: articleId,
             title: title,
             topic: topic,
+            keywords: keywords,
             reads: reads,
             listens: listens,
             kilobytes: kilobytes,
             freedKilobytes: freedKilobytes,
             goneReason: goneReason,
+            lastSeenDay: lastSeenDay,
             rowid: rowid,
           ),
           createCompanionCallback: ({
             required String articleId,
             required String title,
             Value<String> topic = const Value.absent(),
+            Value<String> keywords = const Value.absent(),
             Value<int> reads = const Value.absent(),
             Value<int> listens = const Value.absent(),
             Value<int> kilobytes = const Value.absent(),
             Value<int> freedKilobytes = const Value.absent(),
             Value<String?> goneReason = const Value.absent(),
+            Value<String> lastSeenDay = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               LedgerRowsCompanion.insert(
             articleId: articleId,
             title: title,
             topic: topic,
+            keywords: keywords,
             reads: reads,
             listens: listens,
             kilobytes: kilobytes,
             freedKilobytes: freedKilobytes,
             goneReason: goneReason,
+            lastSeenDay: lastSeenDay,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -3233,23 +4179,23 @@ typedef $$WordRowsTableProcessedTableManager = ProcessedTableManager<
 typedef $$PlanRowsTableCreateCompanionBuilder = PlanRowsCompanion Function({
   Value<int> id,
   Value<String> reader,
-  Value<String> topics,
   Value<String> style,
   Value<String> gloss,
   Value<String> avoid,
-  Value<int> length,
-  Value<int> marked,
+  Value<int> shortWords,
+  Value<int> mediumWords,
+  Value<int> longWords,
   Value<String> raw,
 });
 typedef $$PlanRowsTableUpdateCompanionBuilder = PlanRowsCompanion Function({
   Value<int> id,
   Value<String> reader,
-  Value<String> topics,
   Value<String> style,
   Value<String> gloss,
   Value<String> avoid,
-  Value<int> length,
-  Value<int> marked,
+  Value<int> shortWords,
+  Value<int> mediumWords,
+  Value<int> longWords,
   Value<String> raw,
 });
 
@@ -3268,9 +4214,6 @@ class $$PlanRowsTableFilterComposer
   ColumnFilters<String> get reader => $composableBuilder(
       column: $table.reader, builder: (column) => ColumnFilters(column));
 
-  ColumnFilters<String> get topics => $composableBuilder(
-      column: $table.topics, builder: (column) => ColumnFilters(column));
-
   ColumnFilters<String> get style => $composableBuilder(
       column: $table.style, builder: (column) => ColumnFilters(column));
 
@@ -3280,11 +4223,14 @@ class $$PlanRowsTableFilterComposer
   ColumnFilters<String> get avoid => $composableBuilder(
       column: $table.avoid, builder: (column) => ColumnFilters(column));
 
-  ColumnFilters<int> get length => $composableBuilder(
-      column: $table.length, builder: (column) => ColumnFilters(column));
+  ColumnFilters<int> get shortWords => $composableBuilder(
+      column: $table.shortWords, builder: (column) => ColumnFilters(column));
 
-  ColumnFilters<int> get marked => $composableBuilder(
-      column: $table.marked, builder: (column) => ColumnFilters(column));
+  ColumnFilters<int> get mediumWords => $composableBuilder(
+      column: $table.mediumWords, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get longWords => $composableBuilder(
+      column: $table.longWords, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<String> get raw => $composableBuilder(
       column: $table.raw, builder: (column) => ColumnFilters(column));
@@ -3305,9 +4251,6 @@ class $$PlanRowsTableOrderingComposer
   ColumnOrderings<String> get reader => $composableBuilder(
       column: $table.reader, builder: (column) => ColumnOrderings(column));
 
-  ColumnOrderings<String> get topics => $composableBuilder(
-      column: $table.topics, builder: (column) => ColumnOrderings(column));
-
   ColumnOrderings<String> get style => $composableBuilder(
       column: $table.style, builder: (column) => ColumnOrderings(column));
 
@@ -3317,11 +4260,14 @@ class $$PlanRowsTableOrderingComposer
   ColumnOrderings<String> get avoid => $composableBuilder(
       column: $table.avoid, builder: (column) => ColumnOrderings(column));
 
-  ColumnOrderings<int> get length => $composableBuilder(
-      column: $table.length, builder: (column) => ColumnOrderings(column));
+  ColumnOrderings<int> get shortWords => $composableBuilder(
+      column: $table.shortWords, builder: (column) => ColumnOrderings(column));
 
-  ColumnOrderings<int> get marked => $composableBuilder(
-      column: $table.marked, builder: (column) => ColumnOrderings(column));
+  ColumnOrderings<int> get mediumWords => $composableBuilder(
+      column: $table.mediumWords, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get longWords => $composableBuilder(
+      column: $table.longWords, builder: (column) => ColumnOrderings(column));
 
   ColumnOrderings<String> get raw => $composableBuilder(
       column: $table.raw, builder: (column) => ColumnOrderings(column));
@@ -3342,9 +4288,6 @@ class $$PlanRowsTableAnnotationComposer
   GeneratedColumn<String> get reader =>
       $composableBuilder(column: $table.reader, builder: (column) => column);
 
-  GeneratedColumn<String> get topics =>
-      $composableBuilder(column: $table.topics, builder: (column) => column);
-
   GeneratedColumn<String> get style =>
       $composableBuilder(column: $table.style, builder: (column) => column);
 
@@ -3354,11 +4297,14 @@ class $$PlanRowsTableAnnotationComposer
   GeneratedColumn<String> get avoid =>
       $composableBuilder(column: $table.avoid, builder: (column) => column);
 
-  GeneratedColumn<int> get length =>
-      $composableBuilder(column: $table.length, builder: (column) => column);
+  GeneratedColumn<int> get shortWords => $composableBuilder(
+      column: $table.shortWords, builder: (column) => column);
 
-  GeneratedColumn<int> get marked =>
-      $composableBuilder(column: $table.marked, builder: (column) => column);
+  GeneratedColumn<int> get mediumWords => $composableBuilder(
+      column: $table.mediumWords, builder: (column) => column);
+
+  GeneratedColumn<int> get longWords =>
+      $composableBuilder(column: $table.longWords, builder: (column) => column);
 
   GeneratedColumn<String> get raw =>
       $composableBuilder(column: $table.raw, builder: (column) => column);
@@ -3389,45 +4335,45 @@ class $$PlanRowsTableTableManager extends RootTableManager<
           updateCompanionCallback: ({
             Value<int> id = const Value.absent(),
             Value<String> reader = const Value.absent(),
-            Value<String> topics = const Value.absent(),
             Value<String> style = const Value.absent(),
             Value<String> gloss = const Value.absent(),
             Value<String> avoid = const Value.absent(),
-            Value<int> length = const Value.absent(),
-            Value<int> marked = const Value.absent(),
+            Value<int> shortWords = const Value.absent(),
+            Value<int> mediumWords = const Value.absent(),
+            Value<int> longWords = const Value.absent(),
             Value<String> raw = const Value.absent(),
           }) =>
               PlanRowsCompanion(
             id: id,
             reader: reader,
-            topics: topics,
             style: style,
             gloss: gloss,
             avoid: avoid,
-            length: length,
-            marked: marked,
+            shortWords: shortWords,
+            mediumWords: mediumWords,
+            longWords: longWords,
             raw: raw,
           ),
           createCompanionCallback: ({
             Value<int> id = const Value.absent(),
             Value<String> reader = const Value.absent(),
-            Value<String> topics = const Value.absent(),
             Value<String> style = const Value.absent(),
             Value<String> gloss = const Value.absent(),
             Value<String> avoid = const Value.absent(),
-            Value<int> length = const Value.absent(),
-            Value<int> marked = const Value.absent(),
+            Value<int> shortWords = const Value.absent(),
+            Value<int> mediumWords = const Value.absent(),
+            Value<int> longWords = const Value.absent(),
             Value<String> raw = const Value.absent(),
           }) =>
               PlanRowsCompanion.insert(
             id: id,
             reader: reader,
-            topics: topics,
             style: style,
             gloss: gloss,
             avoid: avoid,
-            length: length,
-            marked: marked,
+            shortWords: shortWords,
+            mediumWords: mediumWords,
+            longWords: longWords,
             raw: raw,
           ),
           withReferenceMapper: (p0) => p0
@@ -3448,6 +4394,396 @@ typedef $$PlanRowsTableProcessedTableManager = ProcessedTableManager<
     $$PlanRowsTableUpdateCompanionBuilder,
     (PlanRow, BaseReferences<_$AppDatabase, $PlanRowsTable, PlanRow>),
     PlanRow,
+    PrefetchHooks Function()>;
+typedef $$InstructionRowsTableCreateCompanionBuilder = InstructionRowsCompanion
+    Function({
+  required String id,
+  required String instructionText,
+  required String createdDay,
+  Value<String?> lastUsedDay,
+  Value<int> useCount,
+  Value<int> rowid,
+});
+typedef $$InstructionRowsTableUpdateCompanionBuilder = InstructionRowsCompanion
+    Function({
+  Value<String> id,
+  Value<String> instructionText,
+  Value<String> createdDay,
+  Value<String?> lastUsedDay,
+  Value<int> useCount,
+  Value<int> rowid,
+});
+
+class $$InstructionRowsTableFilterComposer
+    extends Composer<_$AppDatabase, $InstructionRowsTable> {
+  $$InstructionRowsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get instructionText => $composableBuilder(
+      column: $table.instructionText,
+      builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get createdDay => $composableBuilder(
+      column: $table.createdDay, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get lastUsedDay => $composableBuilder(
+      column: $table.lastUsedDay, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get useCount => $composableBuilder(
+      column: $table.useCount, builder: (column) => ColumnFilters(column));
+}
+
+class $$InstructionRowsTableOrderingComposer
+    extends Composer<_$AppDatabase, $InstructionRowsTable> {
+  $$InstructionRowsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get instructionText => $composableBuilder(
+      column: $table.instructionText,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get createdDay => $composableBuilder(
+      column: $table.createdDay, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get lastUsedDay => $composableBuilder(
+      column: $table.lastUsedDay, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get useCount => $composableBuilder(
+      column: $table.useCount, builder: (column) => ColumnOrderings(column));
+}
+
+class $$InstructionRowsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $InstructionRowsTable> {
+  $$InstructionRowsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get instructionText => $composableBuilder(
+      column: $table.instructionText, builder: (column) => column);
+
+  GeneratedColumn<String> get createdDay => $composableBuilder(
+      column: $table.createdDay, builder: (column) => column);
+
+  GeneratedColumn<String> get lastUsedDay => $composableBuilder(
+      column: $table.lastUsedDay, builder: (column) => column);
+
+  GeneratedColumn<int> get useCount =>
+      $composableBuilder(column: $table.useCount, builder: (column) => column);
+}
+
+class $$InstructionRowsTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $InstructionRowsTable,
+    InstructionRow,
+    $$InstructionRowsTableFilterComposer,
+    $$InstructionRowsTableOrderingComposer,
+    $$InstructionRowsTableAnnotationComposer,
+    $$InstructionRowsTableCreateCompanionBuilder,
+    $$InstructionRowsTableUpdateCompanionBuilder,
+    (
+      InstructionRow,
+      BaseReferences<_$AppDatabase, $InstructionRowsTable, InstructionRow>
+    ),
+    InstructionRow,
+    PrefetchHooks Function()> {
+  $$InstructionRowsTableTableManager(
+      _$AppDatabase db, $InstructionRowsTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$InstructionRowsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$InstructionRowsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$InstructionRowsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> id = const Value.absent(),
+            Value<String> instructionText = const Value.absent(),
+            Value<String> createdDay = const Value.absent(),
+            Value<String?> lastUsedDay = const Value.absent(),
+            Value<int> useCount = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              InstructionRowsCompanion(
+            id: id,
+            instructionText: instructionText,
+            createdDay: createdDay,
+            lastUsedDay: lastUsedDay,
+            useCount: useCount,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String id,
+            required String instructionText,
+            required String createdDay,
+            Value<String?> lastUsedDay = const Value.absent(),
+            Value<int> useCount = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              InstructionRowsCompanion.insert(
+            id: id,
+            instructionText: instructionText,
+            createdDay: createdDay,
+            lastUsedDay: lastUsedDay,
+            useCount: useCount,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$InstructionRowsTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $InstructionRowsTable,
+    InstructionRow,
+    $$InstructionRowsTableFilterComposer,
+    $$InstructionRowsTableOrderingComposer,
+    $$InstructionRowsTableAnnotationComposer,
+    $$InstructionRowsTableCreateCompanionBuilder,
+    $$InstructionRowsTableUpdateCompanionBuilder,
+    (
+      InstructionRow,
+      BaseReferences<_$AppDatabase, $InstructionRowsTable, InstructionRow>
+    ),
+    InstructionRow,
+    PrefetchHooks Function()>;
+typedef $$ArticleRowsTableCreateCompanionBuilder = ArticleRowsCompanion
+    Function({
+  required String articleId,
+  required String title,
+  Value<String> keywords,
+  required String sentences,
+  required String marks,
+  Value<int> wordCount,
+  Value<int> minuteEstimate,
+  Value<int> bytes,
+  Value<int> rowid,
+});
+typedef $$ArticleRowsTableUpdateCompanionBuilder = ArticleRowsCompanion
+    Function({
+  Value<String> articleId,
+  Value<String> title,
+  Value<String> keywords,
+  Value<String> sentences,
+  Value<String> marks,
+  Value<int> wordCount,
+  Value<int> minuteEstimate,
+  Value<int> bytes,
+  Value<int> rowid,
+});
+
+class $$ArticleRowsTableFilterComposer
+    extends Composer<_$AppDatabase, $ArticleRowsTable> {
+  $$ArticleRowsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get articleId => $composableBuilder(
+      column: $table.articleId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get title => $composableBuilder(
+      column: $table.title, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get keywords => $composableBuilder(
+      column: $table.keywords, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get sentences => $composableBuilder(
+      column: $table.sentences, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get marks => $composableBuilder(
+      column: $table.marks, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get wordCount => $composableBuilder(
+      column: $table.wordCount, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get minuteEstimate => $composableBuilder(
+      column: $table.minuteEstimate,
+      builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get bytes => $composableBuilder(
+      column: $table.bytes, builder: (column) => ColumnFilters(column));
+}
+
+class $$ArticleRowsTableOrderingComposer
+    extends Composer<_$AppDatabase, $ArticleRowsTable> {
+  $$ArticleRowsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get articleId => $composableBuilder(
+      column: $table.articleId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get title => $composableBuilder(
+      column: $table.title, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get keywords => $composableBuilder(
+      column: $table.keywords, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get sentences => $composableBuilder(
+      column: $table.sentences, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get marks => $composableBuilder(
+      column: $table.marks, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get wordCount => $composableBuilder(
+      column: $table.wordCount, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get minuteEstimate => $composableBuilder(
+      column: $table.minuteEstimate,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get bytes => $composableBuilder(
+      column: $table.bytes, builder: (column) => ColumnOrderings(column));
+}
+
+class $$ArticleRowsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ArticleRowsTable> {
+  $$ArticleRowsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get articleId =>
+      $composableBuilder(column: $table.articleId, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get keywords =>
+      $composableBuilder(column: $table.keywords, builder: (column) => column);
+
+  GeneratedColumn<String> get sentences =>
+      $composableBuilder(column: $table.sentences, builder: (column) => column);
+
+  GeneratedColumn<String> get marks =>
+      $composableBuilder(column: $table.marks, builder: (column) => column);
+
+  GeneratedColumn<int> get wordCount =>
+      $composableBuilder(column: $table.wordCount, builder: (column) => column);
+
+  GeneratedColumn<int> get minuteEstimate => $composableBuilder(
+      column: $table.minuteEstimate, builder: (column) => column);
+
+  GeneratedColumn<int> get bytes =>
+      $composableBuilder(column: $table.bytes, builder: (column) => column);
+}
+
+class $$ArticleRowsTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $ArticleRowsTable,
+    ArticleRow,
+    $$ArticleRowsTableFilterComposer,
+    $$ArticleRowsTableOrderingComposer,
+    $$ArticleRowsTableAnnotationComposer,
+    $$ArticleRowsTableCreateCompanionBuilder,
+    $$ArticleRowsTableUpdateCompanionBuilder,
+    (ArticleRow, BaseReferences<_$AppDatabase, $ArticleRowsTable, ArticleRow>),
+    ArticleRow,
+    PrefetchHooks Function()> {
+  $$ArticleRowsTableTableManager(_$AppDatabase db, $ArticleRowsTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ArticleRowsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ArticleRowsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$ArticleRowsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> articleId = const Value.absent(),
+            Value<String> title = const Value.absent(),
+            Value<String> keywords = const Value.absent(),
+            Value<String> sentences = const Value.absent(),
+            Value<String> marks = const Value.absent(),
+            Value<int> wordCount = const Value.absent(),
+            Value<int> minuteEstimate = const Value.absent(),
+            Value<int> bytes = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              ArticleRowsCompanion(
+            articleId: articleId,
+            title: title,
+            keywords: keywords,
+            sentences: sentences,
+            marks: marks,
+            wordCount: wordCount,
+            minuteEstimate: minuteEstimate,
+            bytes: bytes,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String articleId,
+            required String title,
+            Value<String> keywords = const Value.absent(),
+            required String sentences,
+            required String marks,
+            Value<int> wordCount = const Value.absent(),
+            Value<int> minuteEstimate = const Value.absent(),
+            Value<int> bytes = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              ArticleRowsCompanion.insert(
+            articleId: articleId,
+            title: title,
+            keywords: keywords,
+            sentences: sentences,
+            marks: marks,
+            wordCount: wordCount,
+            minuteEstimate: minuteEstimate,
+            bytes: bytes,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$ArticleRowsTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $ArticleRowsTable,
+    ArticleRow,
+    $$ArticleRowsTableFilterComposer,
+    $$ArticleRowsTableOrderingComposer,
+    $$ArticleRowsTableAnnotationComposer,
+    $$ArticleRowsTableCreateCompanionBuilder,
+    $$ArticleRowsTableUpdateCompanionBuilder,
+    (ArticleRow, BaseReferences<_$AppDatabase, $ArticleRowsTable, ArticleRow>),
+    ArticleRow,
     PrefetchHooks Function()>;
 typedef $$PresetRowsTableCreateCompanionBuilder = PresetRowsCompanion Function({
   Value<int> id,
@@ -3735,6 +5071,10 @@ class $AppDatabaseManager {
       $$WordRowsTableTableManager(_db, _db.wordRows);
   $$PlanRowsTableTableManager get planRows =>
       $$PlanRowsTableTableManager(_db, _db.planRows);
+  $$InstructionRowsTableTableManager get instructionRows =>
+      $$InstructionRowsTableTableManager(_db, _db.instructionRows);
+  $$ArticleRowsTableTableManager get articleRows =>
+      $$ArticleRowsTableTableManager(_db, _db.articleRows);
   $$PresetRowsTableTableManager get presetRows =>
       $$PresetRowsTableTableManager(_db, _db.presetRows);
   $$SettingsRowsTableTableManager get settingsRows =>

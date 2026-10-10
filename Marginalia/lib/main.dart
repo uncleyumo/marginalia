@@ -10,9 +10,11 @@
 // counting a read, and counting a listen.
 
 import 'dart:async';
+import 'dart:math' show Random;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/services.dart'
     show SystemChrome, SystemNavigator, SystemUiOverlayStyle;
 
@@ -25,10 +27,16 @@ import 'data/database.dart' hide WordRow;
 import 'data/dictionary.dart';
 import 'data/handler.dart';
 import 'data/keystore.dart';
+import 'data/remote/agent.dart';
 import 'data/remote/api.dart';
+import 'data/remote/log.dart';
+import 'data/remote/mcp.dart';
+import 'data/remote/news.dart';
+import 'data/remote/tools.dart';
 import 'data/repository.dart';
 import 'data/samples.dart';
 import 'data/writer.dart';
+import 'domain/instruction.dart';
 import 'domain/library.dart';
 import 'domain/models.dart';
 import 'domain/plan.dart';
@@ -40,18 +48,19 @@ import 'features/article/word_sheet.dart';
 import 'features/history/history_screen.dart';
 import 'features/library/library_screen.dart';
 import 'features/queue/queue_card.dart';
+import 'features/queue/regenerate_sheet.dart';
+import 'features/settings/debug_log_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/words/words_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-      statusBarBrightness: Brightness.dark,
-    ),
-  );
+  // The icons start light because the app's default surface is `warm paper` —
+  // a light surface, which needs DARK icons. The old value was hard-coded the
+  // other way round (written for the dark palette), so on the default surface
+  // the clock and the battery were drawn in near-white on cream. `_applyChrome`
+  // below is what keeps them right once the reader picks a surface.
+  _applyChrome(Palette.warmPaper);
 
   // The lock-screen transport, started before the first frame because
   // `AudioService.init` is what registers the foreground service — and a service
@@ -82,6 +91,26 @@ Future<void> main() async {
   runApp(MarginaliaApp(audioHandler: handler));
 }
 
+/// Point the status-bar icons at the surface they sit on.
+///
+/// Both values are needed and they are NOT the same thing:
+/// `statusBarIconBrightness` is for Android's own icons, `statusBarBrightness`
+/// is what iOS reads to decide the same question. A light surface wants dark
+/// icons; a dark surface wants light ones.
+void _applyChrome(Palette p) {
+  final bool dark = p.brightness == Brightness.dark;
+  SystemChrome.setSystemUIOverlayStyle(
+    SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
+      statusBarBrightness: dark ? Brightness.dark : Brightness.light,
+      systemNavigationBarColor: p.paper,
+      systemNavigationBarIconBrightness:
+          dark ? Brightness.light : Brightness.dark,
+    ),
+  );
+}
+
 class MarginaliaApp extends StatefulWidget {
   const MarginaliaApp({super.key, this.audioHandler});
 
@@ -93,12 +122,73 @@ class MarginaliaApp extends StatefulWidget {
   State<MarginaliaApp> createState() => _MarginaliaAppState();
 }
 
-class _MarginaliaAppState extends State<MarginaliaApp> {
-  /// One surface, chosen once. There is no night/day SWITCH in the app — the
-  /// day/night distinction was removed, not renamed. This is an appearance
-  /// preference that lives in Settings → The small print, with no time
-  /// semantics attached to it.
-  Palette _palette = Palette.warmPaper;
+class _MarginaliaAppState extends State<MarginaliaApp>
+    with WidgetsBindingObserver {
+  /// Which surface to show, and the phone's own opinion about it.
+  ///
+  /// [AppearanceMode.system] needs BOTH of these and the observer below.
+  /// `MediaQuery.platformBrightnessOf` is not available here: this widget is
+  /// ABOVE `MaterialApp`, so there is no MediaQuery to read. The binding's own
+  /// `platformBrightness` is the value, and `didChangePlatformBrightness` is
+  /// the only notification that it moved.
+  AppearanceMode _appearance = AppearanceMode.system;
+  Brightness _platform = Brightness.light;
+
+  /// The face articles are set in. Not a palette concern, but it is persisted
+  /// the same way and it has to reach the whole tree, so it is held here.
+  ReadingFace _face = ReadingFace.notoSerif;
+
+  Palette get _palette => _appearance.paletteFor(_platform);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _platform = WidgetsBinding.instance.platformDispatcher.platformBrightness;
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangePlatformBrightness() {
+    if (!mounted) return;
+    // setState even when the mode is fixed, because the stored value is what a
+    // later switch back to `system` resolves against — and because rebuilding
+    // on a brightness change that does not matter costs one frame.
+    setState(() => _platform = WidgetsBinding.instance.platformDispatcher.platformBrightness);
+  }
+
+  void _setAppearance(AppearanceMode mode) {
+    setState(() => _appearance = mode);
+    _applyChrome(_appearance.paletteFor(_platform));
+    _onPreference?.call('ui:appearance', mode.name);
+  }
+
+  void _setFace(ReadingFace face) {
+    setState(() => _face = face);
+    _onPreference?.call('ui:readingFace', face.name);
+  }
+
+  /// How the app writes a preference down. Set by `_Shell` once the database is
+  /// open, because the database is opened there — the app root has no storage
+  /// of its own, and inventing a second one to save one string would be a
+  /// second place for the same setting to live.
+  void Function(String key, String value)? _onPreference;
+
+  /// Called by `_Shell` when the stored preferences come back.
+  void _adoptPreferences(AppearanceMode appearance, ReadingFace face) {
+    if (!mounted) return;
+    setState(() {
+      _appearance = appearance;
+      _face = face;
+      _platform = WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    });
+    _applyChrome(_palette);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -106,14 +196,20 @@ class _MarginaliaAppState extends State<MarginaliaApp> {
       title: 'Marginalia',
       debugShowCheckedModeBanner: false,
       theme: MarginaliaTheme.themeFor(_palette),
+      builder: (BuildContext context, Widget? child) =>
+          ReadingFaceScope(face: _face, child: child ?? const SizedBox()),
       home: _Shell(
         palette: _palette,
         audioHandler: widget.audioHandler,
-        onTogglePalette: () => setState(() {
-          _palette = _palette == Palette.warmPaper
-              ? Palette.warmInk
-              : Palette.warmPaper;
-        }),
+        appearance: _appearance,
+        face: _face,
+        onAppearance: _setAppearance,
+        onFace: _setFace,
+        onReady: (void Function(String, String) save,
+            AppearanceMode a, ReadingFace f) {
+          _onPreference = save;
+          _adoptPreferences(a, f);
+        },
       ),
     );
   }
@@ -122,12 +218,28 @@ class _MarginaliaAppState extends State<MarginaliaApp> {
 class _Shell extends StatefulWidget {
   const _Shell({
     required this.palette,
-    required this.onTogglePalette,
+    required this.appearance,
+    required this.face,
+    required this.onAppearance,
+    required this.onFace,
+    required this.onReady,
     this.audioHandler,
   });
 
   final Palette palette;
-  final VoidCallback onTogglePalette;
+  final AppearanceMode appearance;
+  final ReadingFace face;
+  final ValueChanged<AppearanceMode> onAppearance;
+  final ValueChanged<ReadingFace> onFace;
+
+  /// Hands the app root its save function and the stored preferences, once the
+  /// database is open. See `_MarginaliaAppState._onPreference`.
+  final void Function(
+    void Function(String key, String value) save,
+    AppearanceMode appearance,
+    ReadingFace face,
+  ) onReady;
+
   final MarginaliaAudioHandler? audioHandler;
 
   @override
@@ -187,6 +299,26 @@ class _ShellState extends State<_Shell> {
   ReadSize _readSize = ReadSize.medium;
   ListenSize _listenSize = ListenSize.large;
 
+  /// Whether opening the Listen screen starts speaking. Off by default: some
+  /// readers want it, others are in a quiet room and a screen that talks first
+  /// is a scare, not a feature.
+  bool _listenAutoPlay = false;
+
+  /// What happens when one article plays to its last sentence.
+  /// `off` — stop. `forever` — keep going. `count` — keep going [n] more times.
+  String _listenAutoContinue = 'off';
+  int _listenAutoContinueCount = 3;
+
+  /// How the next article is picked when auto-continue fires.
+  /// `newest` · `oldest` · `mostStudied` · `leastStudied` · `random`.
+  String _listenAutoOrder = 'newest';
+
+  /// Mirrors of the two preferences the app root owns. Held here too because
+  /// this is where the Settings screen is built from, and because this is the
+  /// object that can reach the database to save them.
+  AppearanceMode _appearance = AppearanceMode.system;
+  ReadingFace _face = ReadingFace.notoSerif;
+
   // ── the two keys and where they point ─────────────────────────────────
   String _writerId = 'deepseek';
   String _writerBase = WriterEndpoint.deepseek.baseUrl;
@@ -198,6 +330,11 @@ class _ShellState extends State<_Shell> {
   void initState() {
     super.initState();
     _boot();
+    // Deliberately NOT awaited and not part of `_boot`. Reading the version
+    // touches the platform channel, and the boot sequence is ordered on purpose
+    // — a version string is not worth a place in it. It lands whenever it lands
+    // and the hub row fills itself in.
+    unawaited(_loadVersion());
   }
 
   @override
@@ -319,13 +456,27 @@ class _ShellState extends State<_Shell> {
 
     final String? size = await get('ui:readSize');
     final String? lsize = await get('ui:listenSize');
+    final String? appearance = await get('ui:appearance');
+    final String? face = await get('ui:readingFace');
     final String? wid = await get('writer:id');
     final String? wbase = await get('writer:base');
     final String? vbase = await get('voice:base');
     final String? vname = await get('voice:name');
     final String? vsrc = await get('voice:source');
+    // Listen behaviour. Absent means OFF / no-continue / newest — the quiet
+    // defaults, so a reader who has never opened Settings is never surprised.
+    final String? lauto = await get('listen:autoPlay');
+    final String? lcont = await get('listen:autoContinue');
+    final String? lcontN = await get('listen:autoContinueCount');
+    final String? lorder = await get('listen:autoOrder');
+    // The two optional sources. Absent means ON — the reader saved a key, and
+    // the common case is that they saved it because they wanted it. Only an
+    // explicit "off" switches it off.
+    final bool newsOnPref = (await get('news:on')) != 'off';
+    final bool searchOnPref = (await get('search:on')) != 'off';
 
-    final (bool hasWriter, bool hasVoice) = await _keys.status();
+    final (bool hasWriter, bool hasVoice, bool hasNews, bool hasSearch) =
+        await _keys.status();
     final String? voiceKey = await _keys.voice();
     // These two flags are what the Settings hub and its Test buttons read. They
     // were read from the keystore here and then dropped on the floor, so a
@@ -337,6 +488,13 @@ class _ShellState extends State<_Shell> {
     setState(() {
       _hasWriterKey = hasWriter;
       _hasVoiceKey = hasVoice;
+      // Saving a key switches its source on; the switch in Settings can turn it
+      // off again without the reader having to delete the key and paste it back.
+      // So a saved key is the DEFAULT for the switch, not the switch itself.
+      _hasNewsKey = hasNews;
+      _hasSearchKey = hasSearch;
+      _newsOn = hasNews && newsOnPref;
+      _searchOn = hasSearch && searchOnPref;
       _readSize = ReadSize.values.firstWhere(
         (ReadSize r) => r.label == size,
         orElse: () => ReadSize.medium,
@@ -345,7 +503,34 @@ class _ShellState extends State<_Shell> {
         (ListenSize r) => r.label == lsize,
         orElse: () => ListenSize.large,
       );
+      _listenAutoPlay = lauto == 'on';
+      _listenAutoContinue = <String>{'off', 'forever', 'count'}.contains(lcont)
+          ? lcont!
+          : 'off';
+      _listenAutoContinueCount = int.tryParse(lcontN ?? '') ?? 3;
+      if (_listenAutoContinueCount < 1) _listenAutoContinueCount = 1;
+      _listenAutoOrder = <String>{
+        'newest',
+        'oldest',
+        'mostStudied',
+        'leastStudied',
+        'random',
+      }.contains(lorder)
+          ? lorder!
+          : 'newest';
       _writerId = endpoint.id;
+      // The two appearance preferences are resolved here and handed UP to the
+      // app root, which owns the theme. Stored by NAME rather than by index, so
+      // inserting a face into the enum cannot silently move every reader to a
+      // different font.
+      _appearance = AppearanceMode.values.firstWhere(
+        (AppearanceMode a) => a.name == appearance,
+        orElse: () => AppearanceMode.system,
+      );
+      _face = ReadingFace.values.firstWhere(
+        (ReadingFace f) => f.name == face,
+        orElse: () => ReadingFace.notoSerif,
+      );
       _writerBase = wbase ?? endpoint.baseUrl;
       _voiceBase = vbase ?? VoiceEndpoint.mimo.baseUrl;
       _voiceName = vname ?? VoiceEndpoint.mimo.voices.first;
@@ -365,6 +550,13 @@ class _ShellState extends State<_Shell> {
         voice: _voiceName,
       );
     });
+
+    // Hand the app root its save function and the two preferences it owns. It
+    // is done HERE rather than in `initState` because this is the first moment
+    // the database has answered: a root that saved a preference before then
+    // would be writing to a repository that does not exist yet, and a root that
+    // THEMED itself before then would flash the wrong surface on every launch.
+    widget.onReady(_save, _appearance, _face);
   }
 
   Future<void> _save(String key, String value) async {
@@ -375,7 +567,29 @@ class _ShellState extends State<_Shell> {
     }
   }
 
-  /// Save the reading plan. Seven fields plus the reader's own words, and the
+  /// Ask the writer for a new plan. The ONLY other paid call in the app, and
+  /// like the first one it is reachable only from a tap.
+  ///
+  /// The plan's own diff/accept machinery lives in the sheet and in
+  /// `PlanRewrite`; this method's whole job is the key, the endpoint and the
+  /// translation of a missing key into a sentence. It does NOT catch
+  /// `RemoteFailure` — the sheet does, because the sheet is what has somewhere
+  /// to show it.
+  Future<PlanRewrite> _rewritePlan(String request) async {
+    final String? key = await _keys.writer();
+    if (key == null || key.trim().isEmpty) {
+      throw const RemoteFailure(
+          'No key is saved, so nothing was sent. Add one under Who writes.');
+    }
+    return _writer.rewritePlan(
+      plan: _plan,
+      request: request,
+      apiKey: key,
+      endpoint: WriterEndpoint.byId(_writerId),
+    );
+  }
+
+  /// Save the reading plan. Eight fields plus the reader's own words, and the
   /// toast says what saving a plan does NOT do: nothing is written until the
   /// card's Write it is tapped.
   Future<void> _savePlan(ReadingPlan p) async {
@@ -437,7 +651,7 @@ class _ShellState extends State<_Shell> {
           index: empties[slot],
           articleId: a.id,
           title: a.title,
-          topic: a.topic,
+          keywords: a.keywords,
           kilobytes: a.kilobytes,
         );
         await _repo.markSampleInstalled(a.id);
@@ -457,16 +671,32 @@ class _ShellState extends State<_Shell> {
   }
 
   /// A plan costs nothing: no call, no key, no time.
+  ///
+  /// The length is drawn at RANDOM from the three bands rather than fixed at
+  /// medium. A queue of three identical lengths is a queue that stops
+  /// surprising anyone, and variety is the one thing a reading app can offer
+  /// for free. `_randomBand` excludes `custom`, which has no number of its own
+  /// until a reader types one.
   QueueSlot _freePlan() {
     _planCounter++;
+    final LengthBand band = _randomBand();
     return QueueSlot(
       articleId: 'plan-${DateTime.now().millisecondsSinceEpoch}-$_planCounter',
       state: SlotState.planned,
-      topic: 'Free pick',
-      focus: 'whatever the plan suggests',
-      plannedWords: 300,
-      plannedMarked: 6,
+      plannedWords: _plan.wordsFor(band),
+      plannedBand: band,
     );
+  }
+
+  /// One of the three bands, uniformly. Seeded from the clock, because a queue
+  /// that rerolls to the same length twice is a reroll that looks broken.
+  LengthBand _randomBand() {
+    const List<LengthBand> bands = <LengthBand>[
+      LengthBand.short,
+      LengthBand.medium,
+      LengthBand.long,
+    ];
+    return bands[Random().nextInt(bands.length)];
   }
 
   void _push(Widget Function() screen) => setState(() => _stack.add(screen));
@@ -484,7 +714,12 @@ class _ShellState extends State<_Shell> {
   /// buttons, no third: `Set up now` and `Got it` — and the second one is the
   /// sheet frame's own Close under a truer name, not a second control beside it.
   Future<void> _maybeShowSetupNotice() async {
-    final (bool hasWriter, bool hasVoice) = await _keys.status();
+    // Only the first two matter here, and that is deliberate. The news and
+    // search keys are enhancements, not setup: telling a reader their app is
+    // "not configured" because they have not bought a search key would be a
+    // notice about something they never asked for, and the second such notice
+    // is the one they stop reading.
+    final (bool hasWriter, bool hasVoice, _, _) = await _keys.status();
     if (!mounted || _noticeShown) return;
     if (hasWriter && hasVoice) return;
 
@@ -851,26 +1086,26 @@ class _ShellState extends State<_Shell> {
             onMenu: () => _slotMenu(context, q, i),
             onWrite: () => _write(q, i),
             onReroll: () => _reroll(q, i),
+            // Read off the LIVE slot, not the hydrated copy. `_hydrated` returns
+            // a value object for rendering; the flag that says a call is in
+            // flight belongs to the slot the call is writing into.
+            writing: q.slots[i].isWriting,
+            // The card's price depends on whether a source is configured, so
+            // the card is told rather than left to assume. A reader with no
+            // optional keys still sees `Write it · ~$0.002`.
+            research: _canResearch,
+            // A bundled sample is not a generated article. Saying so on the
+            // card is the difference between "the writer keeps producing the
+            // same thing" and "this one shipped with the app".
+            isSample: _samples.containsKey(q.slots[i].articleId),
           ),
-        const SizedBox(height: 4),
-        const _Notice(),
         const SizedBox(height: 14),
-        // "What are they about?" used to sit here as a full-width button that
-        // opened the SAME settings screen as the ⌄ icon three rows above, with a
-        // paragraph explaining what the button underneath it already said. Two
-        // controls for one destination, one of them a paragraph. Removed: the
-        // icon is the settings entry, and the sentence below the cards is where
-        // that promise belongs.
-        Text(
-          'Nothing to confirm. The app records what you touched and never asks '
-          'whether you remember.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13,
-            height: 1.65,
-            color: context.colors.ink3,
-          ),
-        ),
+        // A footnote, not a card. It used to wear the same surface and border
+        // as an article card, so it read as a fourth tappable thing that never
+        // responded. The one promise it makes is smaller than a card: it sits
+        // under the queue the way any other aside does.
+        const _Notice(),
+
       ],
     );
   }
@@ -890,7 +1125,7 @@ class _ShellState extends State<_Shell> {
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             Text(
-              slot.isPlanned ? slot.topicLabel : 'What to do with it',
+              slot.isPlanned ? slot.subjectLabel : 'What to do with it',
               style: TextStyle(
                 fontFamily: TypeScale.serif,
                 fontSize: 18,
@@ -902,8 +1137,10 @@ class _ShellState extends State<_Shell> {
             Text(
               slot.isPlanned
                   ? 'planned · not written yet · nothing has been paid for'
-                  : '${slot.article?.wordCount ?? 0} words · '
-                      '${slot.article?.minuteEstimate ?? 0} min read',
+                  : (slot.article?.sentences.isEmpty ?? true)
+                      ? 'written, but the text is no longer on this phone'
+                      : '${slot.article?.wordCount ?? 0} words · '
+                          '${slot.article?.minuteEstimate ?? 0} min read',
               style: TextStyle(
                 fontFamily: TypeScale.mono,
                 fontSize: 10.5,
@@ -912,34 +1149,58 @@ class _ShellState extends State<_Shell> {
             ),
             const SizedBox(height: 16),
             if (slot.isPlanned) ...<Widget>[
-              _menuRow('Choose another topic', 'free, and rewrites nothing',
+              // One row where there were two.
+              //
+              // `Choose another topic` set the topic and left the length, and
+              // `A different plan` changed both without asking. Neither could
+              // express "same idea, shorter", which is the thing a reader
+              // actually wants — so the topic, the lens and the length became
+              // one question, asked once.
+              _menuRow('Change it', 'what it is about, and how long · free',
                   () async {
                 Navigator.of(ctx).pop();
-                await _changeTopic(q, index);
+                await _changeIt(q, index);
               }),
-              _menuRow('A different plan', 'free · no input needed', () async {
+              _menuRow('Draw another plan', 'free · no input needed', () async {
                 Navigator.of(ctx).pop();
                 _reroll(q, index);
               }),
             ] else ...<Widget>[
-              _menuRow('Read it', '', () {
+              // Both of these are CLOSED when there is no text to open. A ready
+              // slot can lose its body two ways — the reader freed the bytes, or
+              // the article predates bodies being stored — and in both cases
+              // `Read it` opened an empty page. The card no longer offers Read
+              // either; the honest rows are the two below.
+              if ((slot.article?.sentences.isNotEmpty) ?? false) ...<Widget>[
+                _menuRow('Read it', '', () {
+                  Navigator.of(ctx).pop();
+                  _openArticle(slot);
+                }),
+                _menuRow('Listen to it', '', () {
+                  Navigator.of(ctx).pop();
+                  setState(() {
+                    _openId = slot.articleId;
+                    _listeningOn = true;
+                    _tab = Dest.article;
+                  });
+                }),
+              ] else
+                _menuRow('The text is gone',
+                    'its words are not on this phone any more',
+                    () => Navigator.of(ctx).pop()),
+              // This row used to call `_write`, which begins `if (!slot.isPlanned)
+              // return` — so on a READY card it always returned immediately and
+              // the menu item did nothing at all. Silently. `_writeAgain` first
+              // asks what the NEW piece should be (subject, instruction, length),
+              // then retires the old article — free, into the library, counts
+              // intact, and never counted as a read — and only then pays.
+              _menuRow('Write a new one',
+                  'choose the subject · the old one is kept', () async {
                 Navigator.of(ctx).pop();
-                _openArticle(slot);
-              }),
-              _menuRow('Listen to it', '', () {
-                Navigator.of(ctx).pop();
-                setState(() {
-                  _openId = slot.articleId;
-                  _listeningOn = true;
-                  _tab = Dest.article;
-                });
-              }),
-              _menuRow('Write it again', 'costs one call', () async {
-                Navigator.of(ctx).pop();
-                await _write(q, index);
+                await _writeAgain(q, index);
               }),
               _menuRow('Done with it',
-                  'it leaves the queue and goes to your library', () async {
+                  'shelve it — this is not a read', () async {
                 Navigator.of(ctx).pop();
                 await _doneWithIt(q, index);
               }, danger: true),
@@ -1012,67 +1273,166 @@ class _ShellState extends State<_Shell> {
       Toast.show(context, 'that one is only planned — write it first');
       return;
     }
+    // Archive it BEFORE the queue is saved. `retireReadySlot` promises the
+    // caller writes a ledger row, and skipping that made a shelved article
+    // vanish from the library the moment its slot was reused — a reader who
+    // said "done" lost the only copy of something they had paid for. This is
+    // NOT a read and NOT a listen: counts stay at whatever they were.
+    try {
+      await _repo.recordLedger(
+        articleId: retired.id,
+        title: retired.title,
+        keywords: retired.keywords,
+        day: todayDay(),
+        kilobytes: (retired.wordCount * 6 ~/ 1024) + 1,
+      );
+    } catch (e) {
+      debugPrint('the article could not be archived: $e');
+    }
     await _repo.saveQueue(q);
     setState(() {});
     Toast.show(context,
-        '${retired.title} is in your library · a plan took its place');
+        '${retired.title} is in your library · not counted as a read');
   }
 
-  /// Change a planned card's topic through the preset chips, which is where the
-  /// prototype keeps them too.
-  Future<void> _changeTopic(Queue q, int index) async {
-    final List<String> presets = await _repo.presets('topic');
-    final List<String> choices = presets.isEmpty
-        ? <String>['C language', 'NVDA', 'Music', 'Git', 'Reading']
-        : presets;
-
+  /// Change a planned card: what it is about, and how long.
+  ///
+  /// Nothing is applied until the sheet comes back with an answer. A reader who
+  /// opens it and backs out has changed nothing, which is what "cancel" has to
+  /// mean in a panel that edits two things at once.
+  ///
+  /// The saved instructions are read HERE rather than held in state, because
+  /// they change from the settings screen and a cached copy would go stale the
+  /// first time the reader edited one. Ten of them, newest-used first — the
+  /// sheet is a picker, not the manager.
+  Future<void> _changeIt(Queue q, int index) async {
+    final List<Instruction> saved =
+        await _repo.instructions(limit: kRecentInstructions);
     if (!mounted) return;
-    final String? picked = await AppSheet.show<String>(
+
+    final QueueSlot slot = q.slots[index];
+    final PlanRequest? req = await AppSheet.show<PlanRequest>(
       context,
-      title: 'What it is about',
-      builder: (BuildContext ctx) => Padding(
-        padding:
-            const EdgeInsets.fromLTRB(Gap.sheetPad, 0, Gap.sheetPad, 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Wrap(
-              spacing: 7,
-              runSpacing: 7,
-              children: <Widget>[
-                for (final String t in choices)
-                  Pill(t,
-                      mono: false, onTap: () => Navigator.of(ctx).pop(t)),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Text(
-              'Changing a plan costs nothing. Nothing is written until you '
-              'tap Write it.',
-              style: TextStyle(
-                fontFamily: TypeScale.serif,
-                fontSize: 13,
-                height: 1.6,
-                color: ctx.colors.ink3,
-              ),
-            ),
-          ],
-        ),
+      builder: (BuildContext ctx) => RegenerateSheet(
+        initialInstruction: slot.instruction,
+        initialInstructionId: slot.instructionId,
+        initialBand: slot.plannedBand,
+        initialWords: slot.plannedWords,
+        plan: _plan,
+        instructions: saved,
+        // The manager, one tap away. The sheet is popped first by the sheet
+        // itself, so this lands on a plain settings page rather than a stack of
+        // two sheets.
+        onSeeAll: () => _push(() => _settings(pane: Pane.instructions)),
       ),
     );
+    if (req == null || !mounted) return;
 
-    if (picked == null) return;
-    q.editPlan(index, topic: picked);
+    // A random draw is resolved HERE, once, and written onto the card — not
+    // re-drawn on every rebuild, which would make the card's own length change
+    // under the reader's eyes.
+    final LengthBand band = req.random ? _randomBand() : req.band;
+    final int words =
+        band == LengthBand.custom ? req.exactWords : _plan.wordsFor(band);
+
+    q.editPlan(
+      index,
+      instruction: req.instruction,
+      instructionId: req.instructionId,
+      words: words,
+      band: band,
+    );
     await _repo.saveQueue(q);
     if (!mounted) return;
     setState(() {});
     Toast.show(context, 'plan updated · nothing written, nothing paid');
   }
 
+  /// Write a ready card again.
+  ///
+  /// The old article is RETIRED first: it goes to the library with its read and
+  /// listen counts intact, and a fresh plan takes its slot. That is the same
+  /// move `Done with it` makes, and it is free — so the reader pays for exactly
+  /// one thing, which is the new article.
+  ///
+  /// Doing it in this order matters. Writing first and retiring afterwards
+  /// would put two articles in one slot for the length of a network call, and
+  /// the second one would silently overwrite the first if the retire then
+  /// failed.
+  Future<void> _writeAgain(Queue q, int index) async {
+    // Ask FIRST, before anything is retired or paid for. The old article is
+    // still on screen while the sheet is open, and a reader who backs out has
+    // changed nothing and spent nothing — which is what cancel has to mean.
+    final List<Instruction> saved =
+        await _repo.instructions(limit: kRecentInstructions);
+    if (!mounted) return;
+    final PlanRequest? req = await AppSheet.show<PlanRequest>(
+      context,
+      builder: (BuildContext ctx) => RegenerateSheet(
+        initialInstruction: '',
+        initialInstructionId: null,
+        initialBand: LengthBand.medium,
+        initialWords: 0,
+        plan: _plan,
+        instructions: saved,
+        onSeeAll: () => _push(() => _settings(pane: Pane.instructions)),
+      ),
+    );
+    if (req == null || !mounted) return;
+
+    final Article? retired = q.retireReadySlot(index, _freePlan());
+    if (retired == null) {
+      // Planned already — the row should not have been offered, but a menu is
+      // not a lock and this is one line.
+      await _write(q, index);
+      return;
+    }
+    try {
+      await _repo.recordLedger(
+        articleId: retired.id,
+        title: retired.title,
+        keywords: retired.keywords,
+        day: todayDay(),
+        // It already has a real size on the ledger from when it was written;
+        // `recordLedger` keeps the existing one rather than overwriting it, so
+        // this is only a fallback for a row that somehow has none.
+        kilobytes: (retired.wordCount * 6 ~/ 1024) + 1,
+      );
+      await _repo.saveQueue(q);
+    } catch (e) {
+      debugPrint('the old article could not be archived: $e');
+    }
+    if (!mounted) return;
+    // The reader's new subject lands on the REPLACEMENT plan before the write,
+    // so the article that comes back is about what they just asked for rather
+    // than about whatever `_freePlan` happened to leave in the slot.
+    final LengthBand band = req.random ? _randomBand() : req.band;
+    final int words =
+        band == LengthBand.custom ? req.exactWords : _plan.wordsFor(band);
+    q.editPlan(
+      index,
+      instruction: req.instruction,
+      instructionId: req.instructionId,
+      words: words,
+      band: band,
+    );
+    await _repo.saveQueue(q);
+    setState(() {});
+    await _write(q, index);
+  }
+
   /// Open a ready card. A planned card has nothing to open, so this is never
   /// reached from one.
   void _openArticle(QueueSlot slot, {bool fromLibrary = false}) {
-    if (slot.article == null) return;
+    // Zeroed before the load lands, so the previous article's numbers are never
+    // shown against this one for a frame.
+    _readsToday = 0;
+    _readsInAll = 0;
+    unawaited(_loadReadCounts(slot.articleId));
+    // A slot with no body is not openable, and the card and the menu both know
+    // that already — this is the third lock on the same door, because opening
+    // onto an empty page is the one outcome the app must never produce.
+    if (slot.article == null || slot.article!.sentences.isEmpty) return;
     setState(() {
       _openId = slot.articleId;
       _openFromLibrary = fromLibrary;
@@ -1092,24 +1452,59 @@ class _ShellState extends State<_Shell> {
   QueueSlot _hydrated(QueueSlot slot) {
     final Article? a = slot.article;
     if (a == null) return slot;
+    // Only fill in a MISSING body. A real body always wins over the bundle:
+    // `_samples` is keyed by the sample's own id, and if that id is ever reused
+    // for a written article (it used to be, because retiring a slot kept its
+    // id) this lookup would silently replace the reader's article with the
+    // sample. Prefer what is actually in the slot.
+    if (a.sentences.isNotEmpty) return slot;
     final Article? full = _samples[slot.articleId]?.toArticle();
     if (full == null) return slot;
     return QueueSlot(
       articleId: slot.articleId,
       state: slot.state,
       article: full,
-      topic: slot.topic,
-      focus: slot.focus,
+      instruction: slot.instruction,
+      instructionId: slot.instructionId,
       plannedWords: slot.plannedWords,
-      plannedMarked: slot.plannedMarked,
+      plannedBand: slot.plannedBand,
       isWriting: slot.isWriting,
     );
   }
 
-  /// The full article behind a slot identity. A bundled sample carries its own
-  /// text; a written article is in memory too, since Write it produced it here.
-  Article? _articleFor(String id) =>
-      _samples[id]?.toArticle() ?? _written[id];
+  /// The full article behind an identity, from wherever it actually is.
+  ///
+  /// Three places, and the third one was missing: a bundled sample carries its
+  /// own text, an article written in THIS session is in `_written`, and an
+  /// article written in an EARLIER session is only in its queue slot, hydrated
+  /// from `article_rows` at boot.
+  ///
+  /// Without the third lookup, tapping `Read` on a written card after a restart
+  /// set `_openId` correctly and then found nothing — so the Article tab fell
+  /// back to "the first ready slot", which is the bundled sample. The reader
+  /// tapped an article they had paid for and got a different one. The card was
+  /// right, the button was right, and the screen was wrong.
+  Article? _articleFor(String id) {
+    // Real bodies first, bundle last. `_samples` used to be checked first, so
+    // a written article that had inherited the sample's id was invisible: every
+    // open showed the sample instead of the article the reader had just paid
+    // for. The sample is a fallback for an id nothing else claims, never an
+    // override of something that was actually written.
+    final Article? written = _written[id];
+    if (written != null && written.sentences.isNotEmpty) return written;
+    for (final QueueSlot s in _queue?.slots ?? const <QueueSlot>[]) {
+      if (s.articleId == id && s.article != null && s.article!.sentences.isNotEmpty) {
+        return s.article;
+      }
+    }
+    final Article? sample = _samples[id]?.toArticle();
+    if (sample != null) return sample;
+    if (written != null) return written;
+    for (final QueueSlot s in _queue?.slots ?? const <QueueSlot>[]) {
+      if (s.articleId == id) return s.article;
+    }
+    return null;
+  }
 
   /// Articles this phone paid for, kept in memory for the session. The body is
   /// NOT in the database: only its identity and counts are, which is what lets a
@@ -1119,10 +1514,31 @@ class _ShellState extends State<_Shell> {
 
   /// THE ONLY PATH THAT COSTS MONEY, and it is a tap.
   Future<void> _write(Queue q, int index) async {
-    final QueueSlot slot = q.slots[index];
+    QueueSlot slot = q.slots[index];
     if (!slot.isPlanned) {
       Toast.show(context, 'that one is already written');
       return;
+    }
+    // The guard that costs money if it is missing.
+    //
+    // A slot stays `planned` for the whole write, so the check above does NOT
+    // stop a second tap — and a second tap is a second paid request, for an
+    // article that overwrites the first. The button is disabled while busy, but
+    // a disabled button is a UI fact and this is the one place that has to be a
+    // fact about the code.
+    if (slot.isWriting) return;
+
+    // Never write a paid article under a bundled sample's id.
+    //
+    // Older builds kept a slot's id when a ready card was retired, so a sample
+    // slot could be reused for real writes. The write then landed under
+    // `a-sample-pointers` and every lookup preferred the bundle, so the reader
+    // paid for an article they could never open. Mint a fresh id instead of
+    // producing another shadowed write.
+    if (_samples.containsKey(slot.articleId)) {
+      q.reidentify(index, _freePlan().articleId);
+      await _repo.saveQueue(q);
+      slot = q.slots[index];
     }
 
     final String? key = await _keys.writer();
@@ -1138,44 +1554,228 @@ class _ShellState extends State<_Shell> {
     q.slots[index].isWriting = true;
     setState(() {});
 
+    // ── the research, assembled before the write ────────────────────────
+    //
+    // Every line of this is free. The hotboard is one request to uapis.cn that
+    // costs nothing; the recent titles come out of this phone's own database;
+    // the met words come out of the word pool. The only paid call is the write
+    // itself, and NOTHING HERE CAN FAIL IT — a source that does not answer is
+    // simply not consulted, and the article is written from what the model
+    // already knows.
+    //
+    // This is also where the cost line's honesty is decided: with no source
+    // configured, `tools` comes out empty, no loop is built, and the write is
+    // the single call the card promised.
+    final AgentLoop? agent = await _buildAgent(ep, key);
+    final List<NewsItem> news = _newsForThisWrite;
+    final List<String> recent = await _recentTitles();
+    final List<String> met = <String>[
+      for (final WordEntry w in _pool?.crucial(todayDay()) ?? const <WordEntry>[])
+        w.lemma,
+    ];
+    if (!mounted) return;
+
+    // The call and the saving are handled separately, because they fail for
+    // different reasons and only one of them means "nothing was written". A
+    // single catch-all reported a failed SAVE as a failed WRITE, which tells
+    // the reader their money bought nothing when in fact the article is on
+    // screen in front of them.
+    AgentResult? ran;
+    final Article article;
     try {
-      final Article article = await _writer.write(
+      article = await _writer.write(
         articleId: slot.articleId,
-        topic: slot.topicLabel,
-        focus: slot.focus,
+        instruction: slot.instruction,
         plan: _plan,
-        words: slot.plannedWords > 0 ? slot.plannedWords : _plan.length,
-        marked: slot.plannedMarked > 0 ? slot.plannedMarked : _plan.marked,
+        // The number the card is showing, which is the number the reader agreed
+        // to. `_plan.wordsFor` is the fallback for a slot stored by an older
+        // build with no length on it.
+        words: slot.plannedWords > 0
+            ? slot.plannedWords
+            : _plan.wordsFor(slot.plannedBand),
         apiKey: key,
         endpoint: ep,
+        news: news,
+        recentTitles: recent,
+        metWords: met,
+        agent: agent,
+        onResult: (AgentResult r) => ran = r,
       );
-      _written[article.id] = article;
-      q.writeSlot(index, article);
+    } on RemoteFailure catch (e) {
+      // The provider said no, or could not be reached. Nothing was spent, and
+      // the card goes back to being tappable.
+      _failWrite(q, index, e.message + e.cost);
+      return;
+    } catch (e) {
+      _failWrite(q, index, 'nothing was written · $e');
+      return;
+    } finally {
+      // Every exit from the paid call closes the sockets it opened — success,
+      // refusal and crash alike. This is the `finally` that keeps a cancelled
+      // request from leaking a connection.
+      _closeSources();
+    }
+
+    // The instruction was used. Recording it is what makes the picker's order
+    // mean anything — "most recently used" is a fact this line creates.
+    if (slot.instructionId != null) {
+      unawaited(_repo.touchInstruction(slot.instructionId!, todayDay()));
+    }
+
+    // The article exists from here on. A failure below is a STORAGE failure.
+    _written[article.id] = article;
+    q.writeSlot(index, article);
+    try {
+      // The body goes to the database BEFORE the queue says `ready`. A card
+      // that says ready while the body is only in memory is a card that opens
+      // nothing after a restart — which is exactly the bug this fixes.
+      final int bytes = await _repo.saveArticle(article);
       await _repo.saveQueue(q);
       await _repo.recordLedger(
         articleId: article.id,
         title: article.title,
-        topic: article.topic,
-        kilobytes: (article.wordCount * 6 ~/ 1024) + 1,
+        keywords: article.keywords,
+        day: todayDay(),
+        // Ceiling, not floor: an article smaller than a kilobyte still costs a
+        // kilobyte of the budget, and a bar that says "0 KB" next to an article
+        // the reader can see is a bar nobody believes again.
+        kilobytes: (bytes / 1024).ceil().clamp(1, 1 << 20),
       );
-      if (!mounted) return;
-      setState(() {});
-      Toast.show(context,
-          '${article.title} is ready · ~${article.wordCount} words · one call');
-    } on RemoteFailure catch (e) {
-      if (!mounted) return;
-      setState(() {});
-      Toast.show(context, e.message, duration: const Duration(seconds: 5));
     } catch (e) {
+      debugPrint('the article could not be saved: $e');
       if (!mounted) return;
       setState(() {});
-      Toast.show(context, 'nothing was written · $e',
-          duration: const Duration(seconds: 5));
+      Toast.show(
+        context,
+        '${article.title} is here, but could not be saved to this phone · $e',
+        duration: const Duration(seconds: 6),
+      );
+      return;
     }
+
+    if (!mounted) return;
+    setState(() {});
+    // The call count is the REAL one, out of the loop. It used to say "one
+    // call" unconditionally, which was true while the writer was a single
+    // request and stopped being true the moment research was configured. A
+    // price on screen has to be the price that was charged.
+    final int calls = ran?.modelCalls ?? 1;
+    final String callLine = calls == 1 ? 'one call' : '$calls calls';
+    Toast.show(context,
+        '${article.title} is ready · ~${article.wordCount} words · $callLine');
+  }
+
+  // ── the research the writer may do ────────────────────────────────────
+
+  /// The news list this write may draw on, fetched once per write.
+  ///
+  /// Held in a field rather than returned from [_buildAgent] because the list
+  /// has TWO jobs: the tool reads a story out of it by index, and the prompt
+  /// shows the model the thirty titles so it can pick without spending a turn.
+  /// Passing the same list to both is what makes the index in the tool call
+  /// mean the same thing as the index in the prompt.
+  List<NewsItem> _newsForThisWrite = const <NewsItem>[];
+
+  /// Build the loop, or return null when there is nothing to look anything up
+  /// with. Null is the fast path, and it is the DEFAULT path — a reader who has
+  /// configured nothing gets the single call the cost line promises.
+  Future<AgentLoop?> _buildAgent(WriterEndpoint ep, String writerKey) async {
+    _newsForThisWrite = const <NewsItem>[];
+    final List<AgentTool> tools = <AgentTool>[];
+
+    // Both clients are opened here and closed by `_closeSources`, because a
+    // `Future.timeout` does not cancel the socket underneath it — a client that
+    // is merely abandoned keeps a connection open behind the app's back.
+    if (_newsOn) {
+      final String? newsKey = await _keys.news();
+      if (newsKey != null && newsKey.trim().isNotEmpty) {
+        final NewsSource source = NewsSource();
+        _openSources.add(source);
+        try {
+          _newsForThisWrite = await source.hotboard(apiKey: newsKey);
+        } catch (e) {
+          // A hotboard that does not answer is not a failure of the write. The
+          // reader gets a free-choice article, which is what they would have
+          // got with no key at all.
+          AgentLog.instance.warn('plan', 'the news list was not available',
+              detail: <String, Object?>{'error': '$e'});
+        }
+        if (_newsForThisWrite.isNotEmpty) {
+          tools.add(ReadStoryTool(news: source, items: _newsForThisWrite));
+        }
+      }
+    }
+
+    if (_searchOn) {
+      final String? searchKey = await _keys.search();
+      if (searchKey != null && searchKey.trim().isNotEmpty) {
+        final McpClient mcp = McpClient();
+        _openSources.add(mcp);
+        tools.add(WebSearchTool(mcp: mcp, apiKey: searchKey));
+      }
+    }
+
+    if (tools.isEmpty) {
+      // Nothing to look anything up with. Close what was opened for nothing —
+      // the news client did one request and is now done.
+      _closeSources();
+      return null;
+    }
+    return AgentLoop(endpoint: ep, apiKey: writerKey, tools: tools);
+  }
+
+  /// Everything opened for one write, closed when it finishes. A list rather
+  /// than named fields so there is one place to close and no way to add a
+  /// source that leaks.
+  final List<Object> _openSources = <Object>[];
+
+  void _closeSources() {
+    for (final Object s in _openSources) {
+      if (s is NewsSource) s.close();
+      if (s is McpClient) s.close();
+    }
+    _openSources.clear();
+  }
+
+  /// What the writer has recently produced, so it does not repeat itself.
+  ///
+  /// Best-effort: a database that cannot answer costs the writer its memory,
+  /// not the article.
+  Future<List<String>> _recentTitles() async {
+    try {
+      return await _repo.recentTitles();
+    } catch (e) {
+      AgentLog.instance
+          .warn('plan', 'recent titles unavailable', detail: <String, Object?>{
+        'error': '$e',
+      });
+      return const <String>[];
+    }
+  }
+
+  /// Put a slot back the way it was and say why.
+  ///
+  /// The flag reset is the whole point: it was never cleared on the failure
+  /// path, so one refused key or one dropped connection left the card reading
+  /// "Writing…" for the rest of the session with a dead button on it.
+  void _failWrite(Queue q, int index, String message) {
+    if (index >= 0 && index < q.slots.length) {
+      q.slots[index].isWriting = false;
+    }
+    if (!mounted) return;
+    setState(() {});
+    Toast.show(context, message, duration: const Duration(seconds: 6));
   }
 
   /// Reroll is free, needs no input, and never touches money.
   void _reroll(Queue q, int index) {
+    // The card's ↻ is closed while a write is in flight, but the ⋯ menu reaches
+    // the same method and is not. Guarding here rather than in both callers is
+    // the difference between one place to get right and two.
+    if (q.slots[index].isWriting) {
+      Toast.show(context, 'a write is in flight · it lands in a moment');
+      return;
+    }
     q.reroll(index, _freePlan());
     _repo.saveQueue(q);
     setState(() {});
@@ -1248,6 +1848,12 @@ class _ShellState extends State<_Shell> {
         unawaited(_save('ui:listenSize', s.label));
       },
       onCountListen: () => _countListen(a),
+      autoPlay: _listenAutoPlay,
+      active: _listeningOn,
+      onWordTap: (String w) => _lookupWord(w, -1),
+      listened: _listensInAll,
+      onFinished: () => _onListenFinished(a),
+      onNextArticle: _peekNextListen() != null ? _playNextArticle : null,
     );
   }
 
@@ -1263,6 +1869,116 @@ class _ShellState extends State<_Shell> {
     if (!mounted) return;
     Toast.show(context, 'counted a listen. reads untouched.');
     setState(() {});
+    unawaited(_loadListenCounts(a.id));
+  }
+
+  /// One completed play-through. Counting lives HERE rather than on Play,
+  /// because the rule is "a full listen counts, a start does not". An
+  /// interrupted pass never reaches `onFinished`, so it is never counted.
+  Future<void> _onListenFinished(Article a) async {
+    await _countListen(a);
+    if (!mounted) return;
+    if (_listenAutoContinue == 'off') return;
+    if (_listenAutoContinue == 'count') {
+      if (_autoContinueLeft <= 0) return;
+      _autoContinueLeft--;
+    }
+    await _playNextArticle();
+  }
+
+  /// Remaining auto-continues this session when the mode is `count`.
+  int _autoContinueLeft = 0;
+
+  int _listensInAll = 0;
+
+  final Map<String, int> _studyCounts = <String, int>{};
+  final Map<String, String> _lastSeen = <String, String>{};
+
+  /// Reads + listens, the same "how much have I met this" number the shelf uses.
+  int _studyOf(String articleId) => _studyCounts[articleId] ?? 0;
+  String _lastSeenOf(String articleId) => _lastSeen[articleId] ?? '';
+
+  Future<void> _loadListenCounts(String articleId) async {
+    try {
+      final (int today, int total) = await _repo.readCounts(
+        articleId: articleId,
+        day: todayDay(),
+      );
+      final int listens = await _repo.ledgerListens(articleId);
+      if (!mounted) return;
+      setState(() {
+        _readsToday = today;
+        _readsInAll = total;
+        _listensInAll = listens;
+        _studyCounts[articleId] = total + listens;
+        _lastSeen[articleId] = todayDay();
+      });
+    } catch (e) {
+      debugPrint('listen counts unavailable: $e');
+    }
+  }
+
+  /// Advance to the next article and start it. Silent when there is nothing.
+  Future<void> _playNextArticle() async {
+    final String? nextId = _peekNextListen();
+    if (nextId == null) return;
+    final Article? next = _articleFor(nextId);
+    if (next == null || next.sentences.isEmpty) return;
+    if (!mounted) return;
+    setState(() {
+      _openId = next.id;
+      _listeningOn = true;
+    });
+    unawaited(_loadListenCounts(next.id));
+    unawaited(_loadReadCounts(next.id));
+  }
+
+  /// The next article to listen to, or null. Sees the live queue.
+  ///
+  /// Ordering is the reader's setting: a commute that always plays the same
+  /// three in the same order gets old, and "heard it today" is the one fact
+  /// that should push a random pick away from something.
+  String? _peekNextListen() {
+    final List<({String id, int studied, String seen})> all =
+        <({String id, int studied, String seen})>[];
+    final Set<String> ids = <String>{};
+    for (final QueueSlot s in _queue?.slots ?? const <QueueSlot>[]) {
+      final Article? a = _articleFor(s.articleId);
+      if (a == null || a.sentences.isEmpty) continue;
+      if (!ids.add(a.id)) continue;
+      all.add((id: a.id, studied: _studyOf(a.id), seen: _lastSeenOf(a.id)));
+    }
+    final String? current = _openId;
+    final List<({String id, int studied, String seen})> others =
+        <({String id, int studied, String seen})>[
+      for (final e in all)
+        if (e.id != current) e,
+    ];
+    if (others.isEmpty) return null;
+
+    switch (_listenAutoOrder) {
+      case 'oldest':
+        others.sort((a, b) => a.id.compareTo(b.id));
+      case 'mostStudied':
+        others.sort((a, b) => b.studied.compareTo(a.studied));
+      case 'leastStudied':
+        others.sort((a, b) => a.studied.compareTo(b.studied));
+      case 'random':
+        final List<({String id, int studied, String seen})> fresh =
+            <({String id, int studied, String seen})>[
+          for (final e in others)
+            if (e.seen != todayDay()) e,
+        ];
+        final List<({String id, int studied, String seen})> pool =
+            fresh.isNotEmpty ? fresh : others;
+        return pool[Random().nextInt(pool.length)].id;
+      case 'newest':
+      default:
+        // `_freePlan` ids are `plan-<millis>-…`, so a descending sort is a
+        // descending creation order. The bundled sample has a stable id.
+        others.sort((a, b) => b.id.compareTo(a.id));
+    }
+    return others.first.id;
   }
 
   /// Read or Listen. The prototype's segmented control; the indicator slides
@@ -1293,7 +2009,19 @@ class _ShellState extends State<_Shell> {
           ),
         ),
         Expanded(
-          child: _listeningOn ? listen : read,
+          // Both children stay alive, and the stack is keyed on the article.
+          //
+          // Swapping `_listeningOn ? listen : read` destroyed the Listen
+          // screen every time the reader glanced at Read: the sentence index
+          // reset to 0 and, with auto-play on, the article started over from
+          // the top — the one thing a Listen tab must never do. An
+          // IndexedStack keeps the state; the key makes a NEW article a fresh
+          // screen rather than the previous one with its title swapped.
+          child: IndexedStack(
+            key: ValueKey<String>(_openId ?? 'none'),
+            index: _listeningOn ? 1 : 0,
+            children: <Widget>[read, listen],
+          ),
         ),
       ],
     );
@@ -1328,6 +2056,9 @@ class _ShellState extends State<_Shell> {
       onBack: _leaveArticle,
       onWordTap: _lookupWord,
       onCountRead: () => _countRead(a),
+      readsToday: _readsToday,
+      readsInAll: _readsInAll,
+      counting: _counting,
       speakingIndex: _speakingIndex,
       onSpeakSentence: (int i) => _speakSentence(a, i),
       fromLibrary: _openFromLibrary,
@@ -1373,18 +2104,70 @@ class _ShellState extends State<_Shell> {
     if (mounted) setState(() => _speakingIndex = -1);
   }
 
+  /// How many times the OPEN article has been read: today, and in all.
+  ///
+  /// Read from the database every time the screen opens, because the number is
+  /// the receipt — a count that lived only in this session would be gone the
+  /// moment the reader left and came back, which is exactly the state that made
+  /// them press the button twice.
+  int _readsToday = 0;
+  int _readsInAll = 0;
+
+  /// A count is in flight. Set SYNCHRONOUSLY before the first await, so a
+  /// second tap cannot slip through while the first is being written.
+  bool _counting = false;
+
+  Future<void> _loadReadCounts(String articleId) async {
+    try {
+      final (int today, int total) = await _repo.readCounts(
+        articleId: articleId,
+        day: todayDay(),
+      );
+      if (!mounted) return;
+      // Guarded against a stale response: the reader can leave one article and
+      // open another while this is in flight, and the second one's numbers must
+      // not be overwritten by the first one's.
+      if (_openId != articleId) return;
+      setState(() {
+        _readsToday = today;
+        _readsInAll = total;
+      });
+    } catch (e) {
+      debugPrint('the read counts could not be read: $e');
+    }
+  }
+
   /// Invariant 3: this counts and the article STAYS. Nothing is removed.
+  ///
+  /// The counts are re-read from the database after the write rather than
+  /// incremented here. One source of truth: a number this method added itself
+  /// could disagree with the row it just wrote, and the row is what the History
+  /// tab and the shelf are built from.
   Future<void> _countRead(Article a) async {
-    await _repo.countRead(
-      articleId: a.id,
-      title: a.title,
-      topic: a.topic,
-      day: todayDay(),
-      minutes: a.minuteEstimate,
-    );
+    if (_counting) return;
+    setState(() => _counting = true);
+    try {
+      await _repo.countRead(
+        articleId: a.id,
+        title: a.title,
+        day: todayDay(),
+        minutes: a.minuteEstimate,
+      );
+      await _loadReadCounts(a.id);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _counting = false);
+      Toast.show(context, 'that read could not be counted · $e');
+      return;
+    }
     if (!mounted) return;
-    Toast.show(context, 'counted. it stays in your queue.');
-    setState(() {});
+    setState(() => _counting = false);
+    Toast.show(
+      context,
+      _readsToday <= 1
+          ? 'counted · it stays in your queue'
+          : 'counted ${_readsToday} times today · it stays in your queue',
+    );
   }
 
   /// The tap that makes this app what it is.
@@ -1424,6 +2207,7 @@ class _ShellState extends State<_Shell> {
         starred: entry?.starred ?? false,
         onToggleStar: (bool next) => _setStarred(key, next, day),
         onSpeak: () => _speakWord(surface),
+        dictionary: dict,
       );
       return;
     }
@@ -1443,6 +2227,7 @@ class _ShellState extends State<_Shell> {
           : selectionChance(entry, pool.all(), day),
       onToggleStar: (bool next) => _setStarred(key, next, day),
       onSpeak: () => _speakWord(surface),
+      dictionary: dict,
     );
   }
 
@@ -1708,13 +2493,18 @@ class _ShellState extends State<_Shell> {
       starred: _pool?[lemma]?.starred ?? false,
       onToggleStar: (bool next) => _setStarred(lemma, next, todayDay()),
       onSpeak: () => _speakWord(lemma),
+      dictionary: dict,
     );
   }
 
   // ── settings ──────────────────────────────────────────────────────────
 
-  Widget _settings() {
+  /// [pane] lets a caller open straight onto a page. The queue's "See all saved
+  /// instructions" link uses it, because a reader who tapped that link asked for
+  /// the manager and would rather not be shown the hub and made to find it.
+  Widget _settings({Pane pane = Pane.hub}) {
     return SettingsScreen(
+      initialPane: pane,
       model: SettingsModel(
         plan: _plan,
         writerId: _writerId,
@@ -1725,12 +2515,37 @@ class _ShellState extends State<_Shell> {
         voiceName: _voiceName,
         voiceKeySaved: _hasVoiceKey,
         deviceVoice: _audio.deviceVoice,
-        paletteName: widget.palette.name,
+        appearance: _appearance,
+        face: _face,
+        listenAutoPlay: _listenAutoPlay,
+        listenAutoContinue: _listenAutoContinue,
+        listenAutoContinueCount: _listenAutoContinueCount,
+        listenAutoOrder: _listenAutoOrder,
         dictionaryEntries: _dict?.size ?? 0,
+        newsKeySaved: _hasNewsKey,
+        newsOn: _newsOn,
+        searchKeySaved: _hasSearchKey,
+        searchOn: _searchOn,
+        version: _version,
+        build: _buildNumber,
       ),
       onBack: _pop,
       onPlanChanged: _savePlan,
-      onToggleAppearance: widget.onTogglePalette,
+      // Null without a key, so the button is disabled rather than failing at
+      // the network. A control that is offered and then refuses is worse than
+      // one that says up front that it cannot be used yet.
+      onRewritePlan: _hasWriterKey ? _rewritePlan : null,
+      // Both go up to the app root, which owns the theme, and it is the root
+      // that writes them down — one place saves a preference, so there is one
+      // place for it to be saved wrong.
+      onAppearance: (AppearanceMode a) {
+        setState(() => _appearance = a);
+        widget.onAppearance(a);
+      },
+      onFace: (ReadingFace f) {
+        setState(() => _face = f);
+        widget.onFace(f);
+      },
       onWriterSelected: (String id) {
         final WriterEndpoint ep = WriterEndpoint.byId(id);
         setState(() {
@@ -1779,6 +2594,30 @@ class _ShellState extends State<_Shell> {
         if (!mounted) return;
         Toast.show(context, 'saved on this phone · MiMo is now the voice');
       },
+
+      // ── listening ──────────────────────────────────────────────────
+      onListenAutoPlay: (bool on) {
+        setState(() => _listenAutoPlay = on);
+        unawaited(_save('listen:autoPlay', on ? 'on' : 'off'));
+      },
+      onListenAutoContinue: (String mode, int count) {
+        setState(() {
+          _listenAutoContinue = mode;
+          _listenAutoContinueCount = count;
+          // A count chosen mid-session takes effect NOW, not at next launch:
+          // the reader is standing in Settings deciding how many more, and
+          // "starts counting from next app start" is a rule they would not
+          // expect. `forever` never consults the counter; `off` never
+          // continues — `_onListenFinished` reads the mode first.
+          if (mode == 'count') _autoContinueLeft = count;
+        });
+        unawaited(_save('listen:autoContinue', mode));
+        unawaited(_save('listen:autoContinueCount', '$count'));
+      },
+      onListenAutoOrder: (String order) {
+        setState(() => _listenAutoOrder = order);
+        unawaited(_save('listen:autoOrder', order));
+      },
       onProbeVoice: () async {
         await _applyVoice();
         return _audio.probeMiMo();
@@ -1793,16 +2632,172 @@ class _ShellState extends State<_Shell> {
           );
           return null;
         } on RemoteFailure catch (e) {
-          return e.message;
+          return e.message + e.cost;
         } catch (e) {
           return '$e';
         }
       },
+
+      // ── instructions ────────────────────────────────────────────────
+      onLoadInstructions: () => _repo.instructions(),
+      onSaveInstruction: _saveInstruction,
+      onDeleteInstruction: _deleteInstruction,
+
+      // ── the two optional sources ────────────────────────────────────
+      onNewsKeyChanged: (String key) async {
+        await _keys.saveNews(key);
+        if (!mounted) return;
+        setState(() {
+          _hasNewsKey = key.trim().isNotEmpty;
+          _newsOn = _hasNewsKey;
+        });
+        await _save('news:on', _newsOn ? 'on' : 'off');
+        if (!mounted) return;
+        Toast.show(context, 'saved on this phone · the news source is on');
+      },
+      onNewsToggled: (bool on) async {
+        setState(() => _newsOn = on);
+        await _save('news:on', on ? 'on' : 'off');
+      },
+      onTestNews: _testNews,
+
+      onSearchKeyChanged: (String key) async {
+        await _keys.saveSearch(key);
+        if (!mounted) return;
+        setState(() {
+          _hasSearchKey = key.trim().isNotEmpty;
+          _searchOn = _hasSearchKey;
+        });
+        await _save('search:on', _searchOn ? 'on' : 'off');
+        if (!mounted) return;
+        Toast.show(context, 'saved on this phone · web search is on');
+      },
+      onSearchToggled: (bool on) async {
+        setState(() => _searchOn = on);
+        await _save('search:on', on ? 'on' : 'off');
+      },
+      onTestSearch: _testSearch,
+
+      onOpenDebugLog: () => _push(() => DebugLogScreen(onBack: _pop)),
     );
+  }
+
+  // ── instructions ──────────────────────────────────────────────────────
+
+  /// Save a new instruction, or overwrite one. Returns a sentence on failure.
+  ///
+  /// A duplicate is allowed rather than refused. Two instructions that read the
+  /// same are the reader's business — deduplicating them silently would throw
+  /// away a row they can see, and a list that edits itself is worse than one
+  /// with a redundant line in it.
+  Future<String?> _saveInstruction(String text, {String? id}) async {
+    final String trimmed = text.trim();
+    if (trimmed.isEmpty) return 'An instruction has to say something.';
+    try {
+      await _repo.upsertInstruction(
+        Instruction(
+          id: id ?? 'ins-${DateTime.now().microsecondsSinceEpoch}',
+          text: trimmed,
+          createdDay: todayDay(),
+        ),
+      );
+      return null;
+    } catch (e) {
+      return 'That could not be saved · $e';
+    }
+  }
+
+  Future<String?> _deleteInstruction(String id) async {
+    try {
+      await _repo.deleteInstruction(id);
+      return null;
+    } catch (e) {
+      return 'That could not be deleted · $e';
+    }
+  }
+
+  // ── the two optional source tests ─────────────────────────────────────
+  //
+  // Both are ONE request that proves the key works and writes nothing. The
+  // news test fetches the list (free, 358 ms measured); the search test runs
+  // `tools/list` against the MCP, which answers with the tool names and costs
+  // no model call at all.
+
+  Future<String?> _testNews() async {
+    final String? key = await _keys.news();
+    if (key == null || key.trim().isEmpty) {
+      return 'No key is saved, so nothing was sent.';
+    }
+    final NewsSource source = NewsSource();
+    try {
+      final List<NewsItem> items = await source.hotboard(apiKey: key);
+      if (items.isEmpty) {
+        return 'The news source answered, but with no stories in it.';
+      }
+      return '${items.length} stories came back. Nothing was written.';
+    } catch (e) {
+      return 'The news source could not be reached · $e';
+    } finally {
+      source.close();
+    }
+  }
+
+  Future<String?> _testSearch() async {
+    final String? key = await _keys.search();
+    if (key == null || key.trim().isEmpty) {
+      return 'No key is saved, so nothing was sent.';
+    }
+    try {
+      final List<String> tools = await McpClient.listTools(apiKey: key);
+      if (tools.isEmpty) {
+        return 'The search service answered, but offers no tools.';
+      }
+      return 'It offers ${tools.join(', ')}. Nothing was written.';
+    } catch (e) {
+      return 'The search service could not be reached · $e';
+    }
+  }
+
+  /// What Android says is installed. Empty until the read lands — the hub says
+  /// "reading it…" rather than showing a number it does not have.
+  ///
+  /// This is the only reason `package_info_plus` is a dependency: the question
+  /// "is the phone running the APK I just built?" cannot be answered from
+  /// inside the Dart source, because the source is the same for both builds.
+  String _version = '';
+  String _buildNumber = '';
+
+  Future<void> _loadVersion() async {
+    try {
+      final PackageInfo info = await PackageInfo.fromPlatform();
+      if (!mounted) return;
+      setState(() {
+        _version = info.version;
+        _buildNumber = info.buildNumber;
+      });
+    } catch (e) {
+      // A version that cannot be read is not a reason to fail a launch.
+      debugPrint('the version could not be read: $e');
+    }
   }
 
   bool _hasWriterKey = false;
   bool _hasVoiceKey = false;
+
+  // The two optional sources. `_has*Key` is what the keystore says; `_*On` is
+  // what the reader wants. Both are needed: a saved-but-switched-off source
+  // must stay off across a restart, and a switched-on source with no key must
+  // not be consulted.
+  bool _hasNewsKey = false;
+  bool _hasSearchKey = false;
+  bool _newsOn = false;
+  bool _searchOn = false;
+
+  /// True when the writer may reach the network for research. This is the one
+  /// test that decides whether a write takes the agent path or the single-call
+  /// path — and it is what keeps "one call" an honest thing to print on a card
+  /// for a reader who has configured nothing.
+  bool get _canResearch => _hasWriterKey && (_newsOn || _searchOn);
 
   /// Re-point the player after any voice change. One place, so the engine in
   /// play can never disagree with the row that claims to be selected.
@@ -1826,44 +2821,42 @@ class _ShellState extends State<_Shell> {
 /// It used to say "tap 译 on a sentence for 中文", which put the whole
 /// interaction in a language the reader is still learning. Everything in this app
 /// is English except the translations themselves; the notice is no exception.
+///
+/// It is a FOOTNOTE, not a card. A rounded surface with a border and a bold
+/// title looks like one of the three article cards above it, and a reader who
+/// taps a thing that does nothing concludes the app is broken. The promise is
+/// one line of text under the queue, the way any other aside sits.
 class _Notice extends StatelessWidget {
   const _Notice();
 
   @override
   Widget build(BuildContext context) {
     final Palette c = context.colors;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: c.hair),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(
-            'Every word and every sentence has sound',
-            style: TextStyle(
-              fontFamily: TypeScale.sans,
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: c.ink,
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          'Every word and every sentence has sound',
+          style: TextStyle(
+            fontFamily: TypeScale.sans,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+            color: c.ink2,
           ),
-          const SizedBox(height: 3),
-          Text(
-            'tap a word for its meaning · hold a line to hear it · the Listen '
-            'tab plays the whole thing',
-            style: TextStyle(
-              fontFamily: TypeScale.sans,
-              fontSize: 12.5,
-              height: 1.5,
-              color: c.ink3,
-            ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          'tap a word for its meaning · hold a line to hear it · the Listen '
+          'tab plays the whole thing · nothing to confirm — the app records '
+          'what you touched and never asks whether you remember',
+          style: TextStyle(
+            fontFamily: TypeScale.sans,
+            fontSize: 12,
+            height: 1.55,
+            color: c.ink3,
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

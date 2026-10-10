@@ -75,7 +75,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           final String q = _search.text.trim().toLowerCase();
           return q.isEmpty ||
               r.title.toLowerCase().contains(q) ||
-              r.topic.toLowerCase().contains(q);
+              r.keywords.any((String k) => k.toLowerCase().contains(q));
         })
         .toList();
 
@@ -338,7 +338,10 @@ class ShelfRowView extends StatelessWidget {
       parts.add('in the queue');
       if (row.meta.isNotEmpty) parts.add(row.meta);
     } else {
-      parts.add(row.topic.isEmpty ? 'archived' : row.topic);
+      // Keywords when there are any, `archived` when there are not. An
+      // article written before keywords existed has a ledger row and nothing
+      // else to say about itself, and `archived` is honest about that.
+      parts.add(row.keywords.isEmpty ? 'archived' : row.keywords.join(' · '));
       if (row.meta.isNotEmpty) parts.add(row.meta);
     }
     if (!row.isGone && row.reads == 0 && row.listens > 0) {

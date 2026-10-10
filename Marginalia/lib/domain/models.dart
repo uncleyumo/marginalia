@@ -10,6 +10,9 @@
 // honest housekeeping; resetting the record would be a lie, because the file
 // was never the memory.
 
+import 'difficulty.dart';
+import 'plan.dart' show LengthBand;
+
 /// Why an article's bytes were released.
 ///
 /// The distinction is the whole point: a `gone` article keeps its row, its
@@ -113,29 +116,71 @@ class Article {
   const Article({
     required this.id,
     required this.title,
-    required this.topic,
     required this.sentences,
     required this.marks,
     required this.wordCount,
     required this.minuteEstimate,
-    this.focus = '',
+    this.keywords = const <String>[],
+    this.titleCn = '',
   });
 
   final String id;
   final String title;
 
-  /// A topic IS its own display name — one string, no id/name table to keep in
-  /// sync. DESIGN's deliberate simplification.
-  final String topic;
+  /// The title in Chinese, when the writer produced one.
+  ///
+  /// Empty for older articles and for anything written before this field
+  /// existed. Empty is a real state, not a broken one: the title is still
+  /// tappable for word-by-word meaning either way, which is the part a reader
+  /// stuck on a title actually needs.
+  final String titleCn;
 
-  /// The lens the topic was written through. Same topic + different focus is a
-  /// genuinely different article.
-  final String focus;
+  /// What the article is about, in three to six words the WRITER chose.
+  ///
+  /// This is what replaced `topic`. A topic was a label the reader had to pick
+  /// in advance from a list they had to maintain; a keyword list is produced
+  /// after the fact by the thing that actually knows what it wrote. It is
+  /// strictly more accurate — `pointers · memory · C` says more than `C
+  /// language` ever did — and it costs the reader nothing to keep.
+  ///
+  /// May be empty. An article without keywords is a normal article, not a
+  /// broken one: the writer is asked for them, not required to produce them,
+  /// and a card with a title and no keywords is still a card you can read.
+  final List<String> keywords;
 
   final List<Sentence> sentences;
   final List<Mark> marks;
   final int wordCount;
   final int minuteEstimate;
+
+  /// How hard this text is, worked out from the words the writer chose to mark.
+  ///
+  /// A getter, not a stored field. The body already states everything this
+  /// needs, and a stored copy could disagree with the text it describes —
+  /// which is the "second copy of the truth" this project refuses to create.
+  /// The price is that a stub article read back from the database (no
+  /// sentences in memory) has no band, exactly as it has no word count today.
+  ///
+  /// The count is in RUNNING WORDS, the unit the coverage research uses: a word
+  /// the reader does not know is unknown every time it appears, not only the
+  /// first time. So `pointers` marked once and printed three times costs three.
+  Difficulty? get difficulty {
+    if (wordCount <= 0 || marks.isEmpty) {
+      return difficultyOf(unknownTokens: 0, totalTokens: wordCount);
+    }
+    // Both shapes, because the writer marks whichever the sentence used.
+    final Set<String> forms = <String>{
+      for (final Mark m in marks) ...<String>[
+        m.surface.toLowerCase(),
+        m.lemma.toLowerCase(),
+      ],
+    };
+    int unknown = 0;
+    for (final Sentence s in sentences) {
+      unknown += countUnknownTokens(s.english, forms);
+    }
+    return difficultyOf(unknownTokens: unknown, totalTokens: wordCount);
+  }
 }
 
 /// The article's own on-disk footprint, tracked SEPARATELY from its counts.
@@ -148,7 +193,8 @@ class LedgerEntry {
   LedgerEntry({
     required this.articleId,
     required this.title,
-    required this.topic,
+    this.topic = '',
+    this.keywords = const <String>[],
     this.reads = 0,
     this.listens = 0,
     this.kilobytes = 0,
@@ -158,7 +204,18 @@ class LedgerEntry {
 
   final String articleId;
   final String title;
+
+  /// What this article was about, as recorded when it was written.
+  ///
+  /// A HISTORICAL FIELD, and the only place `topic` survives. It is not
+  /// configuration and nothing reads it to decide anything — it is what the row
+  /// says about an article written before keywords existed. Rows written from
+  /// now on leave it empty and carry [keywords] instead.
   final String topic;
+
+  /// What the writer said the article was about. The shelf searches and
+  /// displays these.
+  final List<String> keywords;
 
   /// How many times the reader has read this THROUGH. A count, never a verdict.
   int reads;
@@ -232,10 +289,10 @@ class QueueSlot {
     required this.articleId,
     required this.state,
     this.article,
-    this.topic = '',
-    this.focus = '',
+    this.instruction = '',
+    this.instructionId,
     this.plannedWords = 0,
-    this.plannedMarked = 0,
+    this.plannedBand = LengthBand.medium,
     this.isWriting = false,
   });
 
@@ -248,14 +305,32 @@ class QueueSlot {
   /// Non-null exactly when [state] is [SlotState.ready].
   final Article? article;
 
-  /// The topic a planned article WILL be about. A topic IS its display name.
-  final String topic;
+  /// What the reader asked for, in their own words — or empty, which is the
+  /// normal case and means the writer picks the subject.
+  ///
+  /// Stored as TEXT on the slot rather than as a reference to the saved
+  /// instruction, because a planned card has to keep saying what it was asked
+  /// for even if the reader later edits or deletes that saved instruction. What
+  /// was asked for is a fact about this slot.
+  final String instruction;
 
-  /// The lens, visible on a planned card so the choice is made before spending.
-  final String focus;
+  /// Which saved instruction it came from, when it came from one. Null for a
+  /// hand-typed instruction and for a free pick.
+  ///
+  /// This exists for ONE reason: so that using an instruction can bump its
+  /// `lastUsedDay` and `useCount` without having to match on text. It is not a
+  /// foreign key and nothing joins on it.
+  final String? instructionId;
 
+  /// How many words this particular article was asked for. Resolved when the
+  /// slot was planned — a band reads its length off the plan, a custom request
+  /// carries the number the reader typed.
   final int plannedWords;
-  final int plannedMarked;
+
+  /// Where [plannedWords] came from. Kept so the card can say which band this
+  /// one is instead of guessing from the number — two bands can share a length,
+  /// and a reader who asked for a custom 300 did not ask for `medium`.
+  final LengthBand plannedBand;
 
   /// True while a write is in flight. Distinct from [state]: this is a
   /// transient, not one of the two resting states.
@@ -264,31 +339,52 @@ class QueueSlot {
   bool get isPlanned => state == SlotState.planned;
   bool get isReady => state == SlotState.ready;
 
-  /// The label a topic pill shows. A card whose topic is empty is a free pick,
-  /// which is a legitimate state, not missing data.
-  String get topicLabel => topic.isEmpty ? 'Free pick' : topic;
+  /// True when the reader asked for nothing in particular and the writer will
+  /// choose the subject. The ordinary case, and a legitimate state rather than
+  /// missing data — which is why it gets a NAME on the card instead of a blank.
+  bool get isFreePick => instruction.trim().isEmpty;
+
+  /// The label a planned card carries in its title position.
+  ///
+  /// An instruction can be a whole sentence, so it is the reader's own words
+  /// here and the card truncates; a free pick gets the neutral word instead of
+  /// an empty space, because a card with nothing at the top reads as broken.
+  String get subjectLabel => isFreePick ? 'Anything' : instruction.trim();
+
+  /// The line under it, saying where the subject came from. Small, and the only
+  /// place the card distinguishes "you asked for this" from "the writer chose".
+  String get subjectNote => isFreePick
+      ? 'the writer picks the subject'
+      : (instructionId == null ? 'your instruction' : 'a saved instruction');
+
+  /// What a planned card says about length. The number is what will be asked
+  /// for; the band is where it came from, and saying both is what keeps the
+  /// card from claiming a band the reader never chose.
+  String get lengthLabel => plannedBand == LengthBand.custom
+      ? '~$plannedWords words · your number'
+      : '${plannedBand.label} · ~$plannedWords words';
 
   QueueSlot copyWith({
     SlotState? state,
     Article? article,
-    String? topic,
-    String? focus,
+    String? instruction,
+    String? instructionId,
     int? plannedWords,
-    int? plannedMarked,
+    LengthBand? plannedBand,
     bool? isWriting,
   }) =>
       QueueSlot(
         articleId: articleId,
         state: state ?? this.state,
         article: article ?? this.article,
-        topic: topic ?? this.topic,
-        focus: focus ?? this.focus,
+        instruction: instruction ?? this.instruction,
+        instructionId: instructionId ?? this.instructionId,
         plannedWords: plannedWords ?? this.plannedWords,
-        plannedMarked: plannedMarked ?? this.plannedMarked,
+        plannedBand: plannedBand ?? this.plannedBand,
         isWriting: isWriting ?? this.isWriting,
       );
 
   @override
   String toString() => 'QueueSlot($articleId, ${state.name}'
-      '${isWriting ? ', writing' : ''}, topic: $topic)';
+      '${isWriting ? ', writing' : ''}, subject: $subjectLabel)';
 }

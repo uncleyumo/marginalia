@@ -9,6 +9,7 @@
 // the phone is charging and the reader is asleep.
 
 import 'models.dart';
+import 'plan.dart' show LengthBand;
 
 /// How many articles are always waiting. A constant, not a maximum.
 const int kQueueSize = 3;
@@ -20,8 +21,18 @@ enum CostKind {
   /// Nothing will be written: editing a plan, rerolling, replacing a card.
   free,
 
-  /// One article will be written. About $0.002.
+  /// One article will be written, in one call. About $0.002.
   oneArticle,
+
+  /// One article, written by the agent. More calls, because the writer may
+  /// look something up first.
+  ///
+  /// This is a separate value rather than a flag on [oneArticle] because the
+  /// two must never be confused: the numbers below are the ONLY thing standing
+  /// between the reader and a surprise, and the ceiling in them is the loop's
+  /// own hard limit (`kMaxModelCalls`). If that constant moves, this string is
+  /// a lie — so it is written to be checkable against it.
+  researchedArticle,
 
   /// One plan rewrite. About $0.002.
   oneRewrite,
@@ -34,8 +45,27 @@ extension CostKindX on CostKind {
   /// vermilion is reserved for spending, and free is a good outcome.
   String get label => switch (this) {
         CostKind.free => 'free · nothing is written',
-        CostKind.oneArticle => '~\$0.002 · one call · ~25 s',
-        CostKind.oneRewrite => '~\$0.002 · one call · ~15 s',
+        // Minutes, not seconds. A measured 180-word article takes 72 s from
+        // MiMo and a long one takes several times that; the old "~25 s" was
+        // written when nothing had been timed.
+        CostKind.oneArticle => '~\$0.002 · one call · ~1–3 min',
+        // Measured: one research run took 274 s end to end (45 s to read two
+        // stories, 230 s to write). The upper bound is the loop's own wall
+        // clock, so this range cannot promise more than the code allows.
+        CostKind.researchedArticle =>
+          '~\$0.002–0.010 · up to 5 calls · ~1–10 min',
+        CostKind.oneRewrite => '~\$0.002 · one call · ~30 s',
+      };
+
+  /// What the button on a card says. Shorter than [label] because it sits on a
+  /// button, and it names the CEILING rather than a range — a button that says
+  /// "0.002–0.010" is asking the reader to do arithmetic at the moment of
+  /// deciding.
+  String get buttonLabel => switch (this) {
+        CostKind.free => 'free',
+        CostKind.oneArticle => 'Write it · ~\$0.002',
+        CostKind.researchedArticle => 'Write it · up to 5 calls',
+        CostKind.oneRewrite => 'Rewrite · ~\$0.002',
       };
 }
 
@@ -137,33 +167,89 @@ class Queue {
     return article;
   }
 
-  /// Give a planned slot a different topic and lens. FREE, instant, no input
-  /// required.
+  /// Give a planned slot a different draw: a new random length, and the
+  /// subject handed back to the writer. FREE, instant, no input required.
   ///
   /// This exists because the plan sheet forces a decision and this does not. The
   /// difference between "I must choose" and "show me another and I will decide
   /// later" is the difference between a chore and a queue you keep.
+  ///
+  /// Note what it CLEARS: the instruction. A reroll means "not this, something
+  /// else", and keeping the reader's sentence while changing only the length
+  /// would be a reroll that rerolls nothing. A reader who wants the same
+  /// instruction with a different length is editing the card, not rerolling it.
   QueueSlot? reroll(int index, QueueSlot replacement) {
     if (index < 0 || index >= _slots.length) return null;
-    final QueueSlot old = _slots[index];
-    // keep the identity so the card does not jump
+    // A reroll is a different plan, so it takes the replacement's fresh id.
+    // Keeping the old one could keep a BUNDLED SAMPLE's id on a planned slot,
+    // and the next write would then land under that id and be shadowed by the
+    // sample every time the queue was drawn. See `retireReadySlot`.
     _slots[index] = QueueSlot(
-      articleId: old.articleId,
+      articleId: replacement.articleId,
       state: SlotState.planned,
       article: null,
-      topic: replacement.topic,
-      focus: replacement.focus,
       plannedWords: replacement.plannedWords,
-      plannedMarked: replacement.plannedMarked,
+      plannedBand: replacement.plannedBand,
     );
     return _slots[index];
   }
 
-  /// Edit a planned slot's topic and lens in place. FREE.
-  void editPlan(int index, {String? topic, String? focus}) {
+  /// Edit a planned slot's instruction and length in place. FREE.
+  ///
+  /// Length takes two arguments because they are two facts: [words] is the
+  /// number that will be asked for, [band] is where it came from. Passing a
+  /// number without saying which band it came from would leave the card
+  /// guessing, and a card that guesses calls a reader's custom 300 "medium".
+  ///
+  /// [instructionId] is passed as `null` when the reader typed something new,
+  /// which is why it cannot use the usual `?? this.` default — see below.
+  void editPlan(
+    int index, {
+    String? instruction,
+    String? instructionId,
+    bool fromSaved = false,
+    int? words,
+    LengthBand? band,
+  }) {
     if (index < 0 || index >= _slots.length) return;
     final QueueSlot s = _slots[index];
-    _slots[index] = s.copyWith(topic: topic ?? s.topic, focus: focus ?? s.focus);
+    _slots[index] = QueueSlot(
+      articleId: s.articleId,
+      state: s.state,
+      article: s.article,
+      instruction: instruction ?? s.instruction,
+      // A hand-typed instruction must CLEAR the saved id, or the card would
+      // keep claiming it came from a saved one and a later edit to that saved
+      // instruction would look like it applied here. `copyWith` cannot express
+      // "set to null", so this is a constructor call rather than a copyWith.
+      instructionId: fromSaved ? instructionId : null,
+      plannedWords: words ?? s.plannedWords,
+      plannedBand: band ?? s.plannedBand,
+      isWriting: s.isWriting,
+    );
+  }
+
+  /// Give a planned slot a new identity.
+  ///
+  /// Identity is minted, not reused: a slot whose id names a bundled sample
+  /// must not receive a paid write under that id, because every later lookup
+  /// prefers the bundle and the written article becomes unopenable. Edits
+  /// (`editPlan`) keep the id on purpose — this is the one call that replaces
+  /// it, and it refuses to touch a slot that is not planned.
+  void reidentify(int index, String articleId) {
+    if (index < 0 || index >= _slots.length) return;
+    final QueueSlot s = _slots[index];
+    if (!s.isPlanned) return;
+    _slots[index] = QueueSlot(
+      articleId: articleId,
+      state: s.state,
+      article: s.article,
+      instruction: s.instruction,
+      instructionId: s.instructionId,
+      plannedWords: s.plannedWords,
+      plannedBand: s.plannedBand,
+      isWriting: s.isWriting,
+    );
   }
 
   /// "Done with it": the card leaves the queue and a PLAN takes its place.
@@ -181,16 +267,24 @@ class Queue {
     if (!s.isReady) return null; // a planned slot has nothing to retire
 
     final Article? retired = s.article;
+    // The replacement keeps ITS OWN id, not the retired article's.
+    //
+    // Reusing the old id made two different articles one identity: the
+    // retired body stayed reachable under the id the new write was about to
+    // take, and any lookup that preferred the older body showed the wrong
+    // article — a bundled sample in particular shadowed every later write
+    // into its slot. Identity is cheap to mint and fatal to share.
     _slots[index] = QueueSlot(
-      articleId: s.articleId,
+      articleId: plannedReplacement.articleId,
       state: SlotState.planned,
       article: null,
-      topic: plannedReplacement.topic.isEmpty
-          ? s.topic
-          : plannedReplacement.topic,
-      focus: plannedReplacement.focus,
+      // The replacement's instruction, whatever it is. A ready slot has no
+      // instruction of its own to fall back to — that field describes what is
+      // about to be written, and this article has already been written.
+      instruction: plannedReplacement.instruction,
+      instructionId: plannedReplacement.instructionId,
       plannedWords: plannedReplacement.plannedWords,
-      plannedMarked: plannedReplacement.plannedMarked,
+      plannedBand: plannedReplacement.plannedBand,
     );
     _assertSize();
     return retired;

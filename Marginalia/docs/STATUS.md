@@ -1,6 +1,6 @@
 # 项目现状
 
-> 最后更新：2026-10-07
+> 最后更新：2026-10-08
 > 这份文档说的是**代码实际做到的事**。当它和 `FLUTTER_PLAN.md` 冲突时以它为准——
 > 那份规划写于动工之前，第 5 行至今还写着"尚未写任何业务代码"。
 
@@ -24,6 +24,12 @@
 | 锁屏播放 | `dumpsys activity services`：`isForeground=true`；通知含 **Previous / Pause / Next** 三键，`vis=PUBLIC` |
 | 设置页刷新 | 进 `Who writes` 存一个 key，返回 hub 后该行从 `no key · the app works fully without one` 变成 `DeepSeek · a key is saved · deepseek-chat` |
 | MiMo 模型 id | 设置页 `Who writes` 卡片显示 `mimo-v2.6-flash`，不再是已下线的 `mimo-v2.5` |
+| **数据库迁移 v1→v2** | 用 v1 的真实数据（3 条 ledger、2 篇已写文章）升级安装：`user_version=2`，`length: 420` → `medium_words: 420`，`reader`/`topics`/`raw` 原样保留，queue 三行俱在且 `planned_band` 回填 `medium`。**触发器活过了重建**：手工插第 4 行被 `RAISE(ABORT, 'queue.size == 3')` 拒绝 |
+| 难度分级 | 队列卡与阅读页头部显示 `312 words · 4 min read · Hard`，与标注密度一致 |
+| 外观三档 | Light 切换后状态栏图标变浅色、Follow the phone 切回后变深色，两种都截图确认可见 |
+| 字体切换 | 选 Roboto Mono 后正文变等宽；**点词仍然命中正确的词**（`pointers` 弹出 `pointers` 的释义）——命中测试的 `TextPainter` 必须用同一个字体，否则每个词都会偏 1~2 个位置 |
+| AI 改配置 | 全流程实测：追加示例 prompt → `Asking…` spinner → 逐字段 jade diff → 锁定的 Close 显示 `Use this plan, or edit your request` → `Use this plan` → 数据库里 `style` 七条落库，`medium_words: 420` 与 `reader` 未被模型改动 |
+| `Change it` 面板 | 主题 chip 单选（选中项 = 卡片当前主题）、长度 chip 显示 `Medium · ~420`；选 `An exact number` 出现步进器；`Use this` 后库里是 `planned_words=350, planned_band=custom` |
 
 ## 代码在哪
 
@@ -34,10 +40,133 @@ lib/
   data/                   sqlite / keystore / 词典 / 音频 / HTTP / 锁屏 handler
   core/                   设计 token 与基础件
   features/               每屏一个目录
+  data/remote/            写作 agent：循环 / 工具 / 知乎 / MCP / 日志（纯 Dart，不 import Flutter）
+  features/settings/      设置七行 + instructions 管理器 + debug 日志界面
 tool/check_invariants.dart  五条不变量的可执行检查（不是单元测试，原因见下）
+tool/check_agent.dart       agent 循环的 45 条检查（预算、重试、parse 全函数、日志打码、成本行与超时的一致性）
 ```
 
-## 本轮（2026-10-07）修的问题
+## 本轮补充（2026-10-08 第二轮）：三条交互修正
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | **`Count this read` 点了没有任何反馈**：不显示已计了几次，离开再进来和没点过一样，用户会重复点 | 计数从数据库读出来实时显示。行文案：没读过 `finished reading?`；读过但今天没读 `finished reading? · read twice before, not today`；今天读过 `counted twice today · 2 in all`。按钮点击期间 `Counting…` 并禁用（与 `Write it` 同一套契约），写完后**从数据库重读**再刷新——不在内存里自增，因为 History 和书架都建在那一行上。进页面时先清零再异步读，防止上一篇的数字闪到这一篇上 |
+| 2 | **`What you read` 没有恢复默认的选项** | 底部新增 `Restore the defaults`：改过配置时可点，点开是应用自己的确认 sheet（`Keep my plan` 是次级按钮）。恢复成 `const ReadingPlan()`；已经是默认时按钮**变灰**并显示 `Nothing to restore — this is already what a fresh install has.` |
+| 3 | **快速迭代时无法确认实机装的是哪个包** | Settings hub 最底下加 mono 的 `version 0.2.0 (2)`。用 `package_info_plus` 读 Android 包管理器的 `versionName` / `versionCode`——**设备上真正装着的那一个**，不是源码里的常量。`pubspec.yaml` 升到 `0.2.0+2` |
+
+第 1 条的根因值得记下来：`ArticleScreen.counted` 这个参数**从来没有被传进去过**，
+所以它恒为 `false`，按钮无论读过几次都显示成第一次的样子。这正是「一个用户看不到的状态，
+用户就会错误地相信它」——只不过这次是反过来，用户正确地不相信它，于是多点几次。
+
+### 这一轮踩到的构建坑
+
+加 `package_info_plus` 之后 `flutter build apk` 挂了十几分钟没有任何输出。
+根因：**本机直连 `repo.maven.apache.org` 是坏的**（直连 12 秒超时，走代理 0.5 秒）。
+触发条件不是「第一次构建」而是「依赖图变了」。已写进 `docs/BUILD.md`，
+并给了判断方法：超过 2 分钟没有新输出就是在等网络，别等，直接加代理重来。
+
+## 本轮（2026-10-08）：topic 被推翻 · instruction · 写作 agent · 可选信息源 · debug 日志
+
+### 一句话
+
+`topic` 整个设计删除，换成**用户自己写的 instruction** + **模型输出的 keywords**；写作从「一次调用」
+升级成一个**有预算、有重试、有日志的小 agent**；可选接入知乎日报与阿里云 web_search MCP；
+Settings 从 5 行变 7 行，新增 `Instructions` 与 `Debug log`。
+
+### 你提的 5 条
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | topic 影响生成随机性与丰富性，长期还要用户维护 | **已删**。`ReadingPlan.topics`、`PlanField.topics`、`QueueSlot.topic/focus`、`Article.topic/focus` 全部移除。8 个 plan 字段变 7 个。数据库 v2→v3 迁移把旧 topic **转换成 instruction**（`"NVDA"` → `"Write about NVDA"`），`Free pick` 占位符不转换 |
+| 2 | topic 改为 instruction，用户自维护，可选旧的或写新的 | **已做**。`Instruction{id, text, createdDay, lastUsedDay, useCount}`，排序用 `COALESCE(last_used_day, created_day) DESC`。`Change it` 面板显示最近 10 条 chip + `✎ Write a new one` + `See all saved instructions ›`；`Settings → Instructions` 是完整管理器（搜索、增删改、二次确认） |
+| 3 | 纯随机生成不受影响，模型自由发挥 | **已做**。instruction 为空即「You decide」，卡片显示 `Anything / the writer picks the subject`。prompt 里加了**当天日期与季节**，并要求「挑一个读者猜不到的题目」 |
+| 4 | 模型输出 keywords 用于卡片渲染 | **已做**。`Article.keywords`（3~6 个词，每个 ≤3 个单词）。卡片与阅读页头显示为 mono 一行；解析失败只当空，不毁掉一次付费生成 |
+| 5 | 接入知乎日报 + 阿里云 MCP，做成一个小 agent | **已做**。见下 |
+
+### agent 实测（真 key，模拟器）
+
+| 项 | 证据 |
+|---|---|
+| 知乎热榜 | 应用内 `Test the key` → `30 stories came back. Nothing was written.`（uapis.cn，8.4 KB） |
+| 阿里云 MCP | 应用内 `Test the key` → `It offers bailian_web_search. Nothing was written.`（`tools/list`，不产生模型调用，**测试不花钱**） |
+| **一次完整生成** | 日志：`hotboard fetched {items: 30}` → `run started {tools: [read_story, web_search]}` → `sending turn {reqBytes: 6171}` → `turn turn ok {status: 200, ms: 65421, completionTokens: 3092, toolCalls: []}` → `run succeeded {turns: 1, modelCalls: 1, spentCalls: 1}`。产出《Why Growing Sales Can Still Sink a Company》，167 词，Hard，keywords `quarterly report · revenue · cash flow · balance sheet` |
+| 第二次生成 | 同样成功，163 词，Easy |
+| **重启后正文还在** | 杀进程重开，卡片仍显示 `167 words · 1 min read · Hard` 与 keywords，点 Read **打开的是这一篇**（这条修的是一个既有缺陷 + 一个新发现的 bug，见下） |
+| 数据库迁移 v2→v3 | 用真实 v2 数据（3 条 ledger、queue 三行带 topic、plan 带 `topics` 列表）升级：`user_version=3`，queue 的 `C language` → `instruction='Write about C language'` 且 `instruction_id` 指回新建的 instruction，`Free pick` → `''`，plan 的三个 topic → 三条 instruction（去重），ledger 历史 topic 原样保留。**触发器活过两次重建**：手工插第 4 行仍被 `RAISE(ABORT, 'queue.size == 3')` 拒绝 |
+| 半迁移恢复 | 手工构造一个 `user_version=2` 但 schema 已是半 v3 的库（这正是第一次失败留下的状态），新代码能重新进入并走完，不再 brick |
+| 卡片成本行 | 配了信息源时显示 `Write it · up to 5 calls`；关掉两个开关后变回 `Write it · ~$0.002`；`Change it` 面板显示 `free · nothing is written` |
+| instruction 生效 | 在 `Change it` 里写 `Read one of today's news stories and write about one`，卡片标题立刻变成这句话、副标题 `your instruction`，生成时模型照做去读了新闻 |
+
+### 这一轮实测抓出来的四个真 bug（都不是推断，是跑出来的）
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 升级安装后应用启动即空队列，日志 `no such column: "topic"` | 迁移里 `INSERT ... SELECT ... FROM queue_rows WHERE "topic" <> ''` 跑在 `queue_rows` 重建**之后**，而那次重建已经把 `topic` 列删了。语句在 PREPARE 阶段就失败，整个 upgrade 中止 | 所有需要读旧列的操作**提到所有分支之前**（`_readOldTopics` / `_readOldQueueTopics`），并且每一步都用 `_hasTable` / `_hasColumn` 判断当前实际 schema——迁移变成**可重入**的 |
+| 2 | 生成 60 秒超时两次，白花钱没产出 | 假设「一次调用 10~20 秒」。实测：`say hello` 1.1 s、带工具 2.5 s、完整 prompt + 30 条标题 + 两个工具 8.9 s、**真正写一篇 180 词带中文译文 72.4 s**。写文章比其它调用慢一个数量级 | `kPerCallTimeoutSeconds` 60 → **240**，`kMaxWallClockSeconds` 120 → **420**，`RemoteApi._writeTimeout` 60 → **240**。成本行从 `~25 s` 改成 `~1–3 min`。`check_agent.dart` 加了三条断言把这两个数字和文案钉在一起 |
+| 3 | 重启后点 Read，打开的是**另一篇**文章 | `_articleFor(id)` 只查 `_samples` 和内存里的 `_written`。重启后正文只在 queue slot 里（从 `article_rows` 水合），查不到就回落到「第一个 ready slot」= 内置样例 | `_articleFor` 增加第三处查找：扫 `_queue.slots` |
+| 4 | 设置页 `Sources` 两张卡片各有一屏空白 | `Btn` 的 build 是 `SizedBox(width: double.infinity)`，放进 `Row` 得到无界宽度 → layout error。**release 模式下错误 widget 渲染成一大块空白**，不是红色，所以看起来像「卡片就是很高」 | 按钮与成本行改成上下排列 |
+
+另外顺手修的：
+
+- **`ready` 卡片没有正文时不再给 `Read`**。两种来源：读者在 library 里 free 掉了字节，或文章写在「正文入库」之前。以前给一个点开是空页的 `Read`，现在卡片写 `the text is no longer on this phone · ⋯ to replace it`，⋯ 菜单里 `Read it` / `Listen to it` 两行也关掉，换成一行说明。`_openArticle` 加同一道锁。
+- **确认面板的「安全选项」不再是主按钮**。`Btn` 默认 `primary: true`，所以 `Keep it` 和 `Delete` 并排两个朱红按钮——既是设计禁止的第二个强调，也让「删」和「不删」长得一样。
+- **日志补了「发送前」那一行**。第一次超时排查时日志里只有 `retrying in 500ms {attempt: 1, reason: timeout}`，没有任何关于「发了什么、多大、带了哪些工具」的信息——分不清是模型在想还是请求根本没出去。现在 POST 之前先记一行。
+- **debug 日志的级别标记**。info 行原本渲染成 `done · · · rmuy…`（三个点连排），现在 info 不写级别词，只有 warn / error 才写。
+
+### 成本诚实：三处
+
+| 位置 | 改动 |
+|---|---|
+| `RemoteFailure.spent` | 新增。任一 POST 拿到 2xx 就置 true。`api.dart` 那句无条件的 `Nothing was sent and nothing was spent.` 变成按 `spent` 二选一 |
+| 成功 toast | 从写死的 `one call` 改成循环报回的**真实调用次数** |
+| 卡片按钮 | 无信息源 = `Write it · ~$0.002`（默认读者，文案不变）；有信息源 = `Write it · up to 5 calls` |
+
+### 补测（同日，用户要求实机跑一遍）
+
+上一版这里写着三条「没做」，现在都做了，而且**又抓出两个 bug**：
+
+| 项 | 结果 |
+|---|---|
+| **`read_story` 真的被调用** | 用 instruction「Read one of today's news stories and write about one」逼出研究行为。日志：turn 1 `finish: tool_calls`，`toolCalls: [read_story, read_story]` **并行两个**；两次抓取 `story fetched {id: 9792945, text: 1527}` 与 `{id: 9793078, text: 2437}`，各 283 ms / 166 ms；turn 2 写出《Why Nobody Farms Elephants》，385 词，Easy，keywords `feed costs · meat prices · livestock…`。**这一轮读了 2 篇、共 2 次模型调用、274 秒** |
+| **快路径** | 两个信息源开关关掉后，卡片立刻变回 `Write it · ~$0.002`（截图）；点下去 65 秒产出《A Phone That Never Hears Music》171 词。**`AgentLog` 全程为空**——证明没有进循环，是真的单次调用 |
+| **飞行模式** | 关掉 wifi/data 后点 Write it，得到一句人话：`Could not reach the provider — check your connection, then try again. Nothing was written and nothing was spent.` 卡片回到 `planned · not written yet · nothing has been paid for`，按钮可点，**没有卡在 Writing…** |
+
+### 补测抓出来的两个 bug
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 5 | 研究那一轮写了 **230 秒**，而 per-call 上限是 240 秒——**只差 10 秒就又被砍掉** | 240/420 这组数字是从一次 72 秒的文章推出来的，没算上「读完两篇再写」的那种调用（10911 个 completion token，其中 31441 字符是模型自己的推理） | `kPerCallTimeoutSeconds` 240 → **360**，`kMaxWallClockSeconds` 420 → **600**；成本行改成 `~1–10 min`；`check_agent.dart` 的断言改成对着 **230 秒这个实测值**，而不是对着感觉 |
+| 6 | 飞行模式的 toast 里是一段调用栈：`Could not reach https://api.xiaomimimo.com/v1/chat/completions — ClientException with SocketException: Failed host lookup: 'api.xiaomimimo.com' (OS Error: ...` | `api.dart` 的 catch 把异常插进了给读者看的句子 | 读者拿到 `Could not reach the provider — check your connection, then try again.`，**技术细节进日志**（`[http] could not reach the provider {url, what, error}`）。同时删掉了只为这件事存在的 `_short()` |
+
+第 6 条正是「必须实机跑一遍」的价值：这段文案在代码里读起来完全正常，
+只有把它显示在一个关掉无线电的手机上，才发现是给学习者看的一段栈帧。
+
+## 上一轮（2026-10-07 第二轮）：配置重做 · 难度分级 · 外观三档
+
+### 你提的 5 条
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | 「每篇标几个解释的词」不该是固定数字 | **已删**。`ReadingPlan.marked` 整个移除，prompt 里不再出现「最多标 N 个」。标几个由模型判断，App 反过来按密度算难度（`difficulty.dart`，阈值取自 Nation 2006 / Laufer 1989 的 98% / 95% 覆盖率）。`The small print` 里写清了它**不**说明什么 |
+| 2 | 字数该是短/中/长三挡 | **已改**。`length` 变成 `shortWords`/`mediumWords`/`longWords`（默认 180/300/500），设置页可逐挡编辑。队列随机抽一挡；⋯ 菜单可选具体挡位、Random 或**精确数字**。数据库 v1→v2 迁移把旧的 `length` 搬进 `mediumWords` |
+| 3 | 外观切换放在 `The small print` 语义不对 | **已改**。hub 新增 `Appearance` 行（五行），Light / Dark / Follow the phone 三档，默认跟随手机。**这推翻了 DESIGN §4/§11 的「no night no day」**，但只推翻了一半：仍然没有任何时钟参与，唯一能自己换面的是手机自身的设置 |
+| 4 | 字体只有两档 | **已改**。6 种，每个都带实时预览（英文 + 中文）。默认 `Noto Serif`——理由见 ARCHITECTURE.md：只有系统字体族的中文才配得上（`fonts.xml` 的 `fallbackFor="serif"` 会让中文走 Noto Serif CJK），bundle 的拉丁字体没有中文，中文会掉到无衬线 |
+| 5 | 没有「配置生成偏好 + AI 生成配置」的页面 | **已做**。`What you read` 现在是完整的配置页；新增 `✦ Ask the AI to change it`：示例 prompt 可叠加、`Asking…` spinner、逐字段 diff、**有未接受的付费结果时 sheet 锁定**（Close 变成 `Use this plan, or edit your request`），编辑输入即作废 diff。`PlanRewrite` 这套领域类型此前写好但从未接过 UI，现在接上了 |
+
+### 顺手修掉的死代码 / 死菜单
+
+| 项 | 问题 |
+|---|---|
+| ⋯ 菜单的 `Write it again` | 调 `_write()`，而 `_write` 开头就是 `if (!slot.isPlanned) return`——在 ready 卡上**永远静默早退**。改为 `_writeAgain()`：先 `retireReadySlot`（免费，旧文进 library 且计数保留）再走正常付费写入 |
+| `Choose another topic` + `A different plan` | 合并成一个 `Change it`。原两条一个改主题不改长度、一个什么都不问就全改，都表达不了「同样的意思，短一点」 |
+| `_freePlan()` 固定 300 字 | 改为随机抽短/中/长 |
+| `ArticleWriter._userPrompt` 重复罗列 plan | 改为复用 `plan.toPrompt()`——两份渲染已经漂移过（一份写 `Articles may come from`，另一份写 `Topics may come from`） |
+| `RemoteApi` 失败文案 | `what` 从动词短语改成动名词短语。旧写法会产出 `That address has no speak a sentence endpoint` 和 `nothing to speak a sentence`——两句从没被读出声过的话 |
+| `Pill` 文字溢出 | 长 chip 会 `RIGHT OVERFLOWED BY 1.8 PIXELS`。`Text` 包进 `Flexible` |
+| 状态栏图标 | `main()` 里硬编码 `statusBarIconBrightness: light`（为深色底写的），在默认的浅色面上几乎看不见。改为随主题反色 |
+| 计划卡不显示长度 | `QueueSlot.lengthLabel` 定义了但从未渲染——读者选完长度，卡片看起来毫无变化。已渲染 |
+
+## 上一轮（2026-10-07）修的问题
 
 ### 你提的 9 条
 
@@ -100,7 +229,8 @@ tool/check_invariants.dart  五条不变量的可执行检查（不是单元测�
 | 单元测试 | `test/` 是空的。本机 `dart test` 起不来（native-asset 子进程 `CreateFile` 231 失败），所以不变量用 `tool/check_invariants.dart` 以**可执行程序**的形式锁住 |
 | 写作端点形状 | DESIGN §9/§11 规定「唯一形状是 `POST {base}/responses`」，但实现走的是 `/chat/completions`。DeepSeek 和 MiMo **都没有** `/responses`（只有 OpenAI 有），所以按文档写会让另外两家直接不可用。实现选了能工作的那个，这是一个**文档与现实的冲突**，需要你决定改代码还是改文档 |
 | 逐词卡拉OK高亮 | 不做。MiMo 不返回 word boundaries，DESIGN §9 明确只做句子级 |
-| 夜间模式 | 不做。DESIGN §4/§11 明确没有日夜概念（`The small print` 里的外观切换是配色偏好，没有时间语义） |
+| ~~夜间模式~~ → **外观三档** | 已做（2026-10-07 推翻原决定）。`Settings → Appearance` 提供 Light / Dark / **Follow the phone**，默认第三项。**仍然没有日夜概念**：没有任何时钟参与，唯一能自己换面的是手机自身的设置，而且只有读者明确要求时才生效。同时提供 6 种正文阅读字体（见 ARCHITECTURE.md「Appearance」） |
+| 文章正文不落库 | 已存在的行为，但有一个可见后果：**重启后，之前写的文章卡片会显示 `0 words · 0 min read`，点 Read 打开是空的**。正文只在内存里（`_written`），数据库只存身份与计数。要修需要新增一张正文表——那和「counts are not storage」的设计直接冲突，属于要你拍板的架构决定，没动 |
 | 评分 / 打卡 / 进度环 | 不做，DESIGN §1 明确禁止 |
 | **pubspec 里 6 个依赖声明了但零引用** | `flutter_riverpod` / `go_router` / `freezed_annotation` / `json_annotation` / `intl` / `collection`，以及 dev 的 `freezed` / `json_serializable`——全仓 `grep 'package:<名字>/'` 零命中。但 pubspec 的注释在为它们辩护（"Provider composition expresses 'computed from that'"、"Nested routes and route parameters carry that context"），而 `main.dart` 里**没有任何 Provider、没有任何路由表**，状态由 `_ShellState` 单点持有。**删依赖等于改架构**，所以留着没动，等你决定：要么删掉并改写注释，要么按注释把 Provider / go_router 真的用起来 |
 

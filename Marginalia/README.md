@@ -40,18 +40,48 @@ bundled sample articles, looks words up in a bundled 392,695-entry dictionary,
 and speaks with the phone's own TTS engine — offline, in airplane mode, for
 $0.00. Keys add a better voice and a cheaper writer; they are never required.
 
-## The two keys
+## The keys
 
-Both are optional and both live in the Android Keystore, never on a server —
-there is no server.
+All of them are optional and all of them live in the Android Keystore, never on
+a server — there is no server.
 
 | Key | What it buys | Where it is configured |
 |---|---|---|
-| Writer | Articles written for you, at your plan's topic | Settings → Who writes the articles |
+| Writer | Articles written for you, on a subject you name or one the writer picks | Settings → Who writes |
 | Voice | MiMo reads articles aloud in a recorded voice | Settings → Voice |
+| News | The writer may read a Zhihu Daily story before writing | Settings → Who writes → Sources |
+| Search | The writer may look a fact up on the web | Settings → Who writes → Sources |
+
+The first two are what "set up" means. The last two are enhancements: with
+neither, the writer still writes, in one call. With one, it can research first —
+which costs a few more calls, and the card says so before you tap it.
+
+**There is no topic setting.** What to write about is either a sentence you
+type (saved as an *instruction*, reusable from any card) or nothing at all, in
+which case the writer chooses. Every article then carries the keywords the
+writer produced, so a card tells you what it is about without you having to
+maintain a list of subjects forever.
 
 Nothing is ever written without you tapping **Write it** on a planned card, and
 that card states the cost before you tap.
+
+## Using it
+
+`docs/USER_GUIDE.md` is the walkthrough for somebody who has never used the app
+and does not want to read about architecture — where the keys go, what each
+button does, what costs money and what does not. Written in Chinese, because
+the reader this app is for is a Chinese speaker learning English.
+
+## Building it
+
+`docs/BUILD.md` is the full manual — SDK paths, the JDK, the proxy, how to drive
+the emulator with adb, and the release checklist. The short version:
+
+```bash
+export ANDROID_HOME="E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+flutter analyze --no-pub && dart tool/check_invariants.dart && dart tool/check_agent.dart
+flutter build apk --release
+```
 
 ## Layout
 

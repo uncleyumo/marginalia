@@ -61,6 +61,16 @@ enum LookupMiss {
 
   /// The dictionary has not finished loading yet.
   notLoaded,
+
+  /// The dictionary tried to load and could not.
+  ///
+  /// Distinct from [notLoaded] on purpose. "Still loading" is a promise that
+  /// the answer is coming; when the inflate failed, or the zip was damaged, or
+  /// the phone was out of space, that promise is false and the reader would sit
+  /// waiting for something that is never going to arrive. A fault has to be
+  /// said out loud, which is the same rule the rest of this app follows for a
+  /// word that is simply absent.
+  unavailable,
 }
 
 class Dictionary {

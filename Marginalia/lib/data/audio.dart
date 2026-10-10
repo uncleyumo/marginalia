@@ -129,6 +129,15 @@ class SentenceAudio implements SentencePlayer {
   String _apiKey = '';
   String _baseUrl = VoiceEndpoint.mimo.baseUrl;
   String _voice = VoiceEndpoint.mimo.voices.first;
+
+  /// The concrete voice id that will actually be sent to the API.
+  ///
+  /// Equal to [_voice] unless the reader picked [kVoiceRandom]. Random is a
+  /// MODE, not an id: the API would reject it. One roll covers a whole
+  /// playback, so an article is spoken by one narrator and the next article
+  /// may be somebody else — a voice that changed mid-sentence would be a
+  /// glitch, a voice that changes between articles is variety.
+  String _speakingAs = VoiceEndpoint.mimo.voices.first;
   bool _sessionReady = false;
 
   @override
@@ -158,7 +167,23 @@ class SentenceAudio implements SentencePlayer {
     _lastSpoken = source;
     _apiKey = apiKey.trim();
     if (baseUrl.trim().isNotEmpty) _baseUrl = baseUrl.trim();
-    if (voice.trim().isNotEmpty) _voice = voice.trim();
+    if (voice.trim().isNotEmpty) {
+      _voice = voice.trim();
+      _speakingAs = _resolveVoice(_voice);
+    }
+  }
+
+  /// Roll a real id for [kVoiceRandom], or pass the id through.
+  ///
+  /// Random excludes itself and nothing else: `mimo_default` is a real voice
+  /// and is a fine roll. Seeded from the clock's microseconds, because a
+  /// `Random()` created once at boot can hand back the same voice on every
+  /// roll for a whole session, which is not random, it is a stuck one.
+  static String _resolveVoice(String wanted) {
+    if (wanted != kVoiceRandom) return wanted;
+    final List<String> real = VoiceEndpoint.mimo.voices;
+    if (real.isEmpty) return 'mimo_default';
+    return real[DateTime.now().microsecondsSinceEpoch % real.length];
   }
 
   /// Set the engine up once. Called from the constructor and not awaited: nothing
@@ -233,7 +258,8 @@ class SentenceAudio implements SentencePlayer {
   /// Settings screen can show verbatim.
   Future<String?> probeMiMo() async {
     try {
-      await _api.testVoice(baseUrl: _baseUrl, apiKey: _apiKey, voice: _voice);
+      await _api.testVoice(
+          baseUrl: _baseUrl, apiKey: _apiKey, voice: _speakingAs);
       return null;
     } on RemoteFailure catch (e) {
       return e.message;
@@ -306,7 +332,7 @@ class SentenceAudio implements SentencePlayer {
         baseUrl: _baseUrl,
         apiKey: _apiKey,
         text: text,
-        voice: _voice,
+        voice: _speakingAs,
       );
       await file.parent.create(recursive: true);
       final File tmp = File('${file.path}.part');
@@ -326,7 +352,7 @@ class SentenceAudio implements SentencePlayer {
     final Directory base = await getApplicationSupportDirectory();
     final Directory dir = Directory(p.join(base.path, 'voice'));
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    return File(p.join(dir.path, '${_hash('$_voice|$text')}.wav'));
+    return File(p.join(dir.path, '${_hash('$_speakingAs|$text')}.wav'));
   }
 
   /// FNV-1a. Short, stable, and good enough to tell two sentences apart — this is
@@ -375,6 +401,13 @@ class SentenceAudio implements SentencePlayer {
     final Completer<void>? c = _current;
     _current = null;
     _currentText = '';
+    // A new playback gets a new narrator when the reader asked for Random.
+    // Stopping is the boundary between "this article" and "the next thing",
+    // which is the only boundary at which changing voice is a choice rather
+    // than a glitch.
+    if (_voice == kVoiceRandom) {
+      _speakingAs = _resolveVoice(kVoiceRandom);
+    }
     try {
       await _tts.stop();
     } catch (_) {

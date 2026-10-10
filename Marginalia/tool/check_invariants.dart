@@ -12,6 +12,8 @@
 // possible — and that constraint is also good design, because it means the
 // rules can never quietly depend on a widget.
 
+import '../lib/domain/difficulty.dart';
+import '../lib/domain/instruction.dart';
 import '../lib/domain/library.dart';
 import '../lib/domain/models.dart';
 import '../lib/domain/plan.dart';
@@ -37,10 +39,10 @@ void section(String title) {
   print('-' * title.length);
 }
 
-Article _article(String id, {String title = 'T', String topic = 'Topic'}) => Article(
+Article _article(String id, {String title = 'T'}) => Article(
       id: id,
       title: title,
-      topic: topic,
+      keywords: const <String>['pointers', 'memory'],
       sentences: const <Sentence>[
         Sentence(english: 'A sentence of English text.', chinese: '一句中文。'),
       ],
@@ -53,16 +55,15 @@ QueueSlot _ready(String id, {String title = 'T'}) => QueueSlot(
       articleId: id,
       state: SlotState.ready,
       article: _article(id, title: title),
-      topic: 'C language',
     );
 
-QueueSlot _planned(String id, {String topic = 'Music', String focus = 'why'}) => QueueSlot(
+/// A planned slot with no instruction — the ordinary case, and the one that
+/// has to render as a NAME rather than a blank.
+QueueSlot _planned(String id) => QueueSlot(
       articleId: id,
       state: SlotState.planned,
-      topic: topic,
-      focus: focus,
       plannedWords: 300,
-      plannedMarked: 6,
+      plannedBand: LengthBand.medium,
     );
 
 Queue _queueWithTwoReadyOnePlanned() =>
@@ -132,7 +133,7 @@ void main() {
   // with no planned slot, writing works. It has to be a PLANNED slot being
   // written — writing an already-ready card is not a thing that can happen.
   final Queue open = Queue(<QueueSlot>[
-    _planned('a1', topic: 'Git'),
+    _planned('a1'),
     _ready('a2'),
     _ready('a3'),
   ]);
@@ -216,15 +217,18 @@ void main() {
   check('and quantifies the win', trade.freed == '412 KB freed',
       'got ${trade.freed}');
 
-  // ── 5. no finished flag, no day/night ─────────────────────────────────
-  section('5. no finished boolean, no day or night');
+  // ── 5. no finished flag, and a day row carries no clock ───────────────
+  // The day-string checks below are about the LEDGER'S DATE FORMAT, not about
+  // appearance: a `YYYY-MM-DD` with no time part cannot shift when the device
+  // timezone does. (Appearance gained a light/dark preference; this is not it.)
+  section('5. no finished boolean, and a day row carries no clock');
   // asserted structurally: nothing in the domain declares such a field
   check('SlotState has no finished', !SlotState.values.any((SlotState s) =>
       s.name.toLowerCase().contains('finish') || s.name.toLowerCase().contains('done')));
   check('MarkTier has no known tier', !MarkTier.values.any((MarkTier t) =>
       t.name.toLowerCase() == 'known'));
   check('a day string is accepted', _isDayString('2026-10-06'));
-  check('a full timestamp is rejected — the app has no day/night',
+  check('a full timestamp is rejected — a day row has no hour in it',
       !_isDayString('2026-10-06T22:14:00'));
   check('and a bare time is rejected',
       !_isDayString('22:14'));
@@ -240,7 +244,7 @@ void main() {
   final LedgerEntry kept = LedgerEntry(
       articleId: 'a2',
       title: 'Why NVDA Moved Today',
-      topic: 'NVDA',
+      keywords: const <String>['nvda', 'earnings'],
       reads: 0,
       listens: 8,
       kilobytes: 366);
@@ -280,11 +284,11 @@ void main() {
   // filters are questions
   check('"worth reading again" needs reads>=2',
       LibraryFilter.reading.matches(
-          const ShelfRow(articleId: 'a', title: 'a', topic: 't', meta: '', reads: 2, listens: 0, kilobytes: 0, freedKilobytes: 0, isLive: false, isGone: false)) &&
+          const ShelfRow(articleId: 'a', title: 'a', keywords: <String>['t'], meta: '', reads: 2, listens: 0, kilobytes: 0, freedKilobytes: 0, isLive: false, isGone: false)) &&
           !LibraryFilter.reading.matches(const ShelfRow(
               articleId: 'a',
               title: 'a',
-              topic: 't',
+              keywords: <String>['t'],
               meta: '',
               reads: 1,
               listens: 9,
@@ -296,7 +300,7 @@ void main() {
       !LibraryFilter.unread.matches(const ShelfRow(
           articleId: 'a',
           title: 'a',
-          topic: 't',
+          keywords: <String>['t'],
           meta: '',
           reads: 0,
           listens: 0,
@@ -308,7 +312,7 @@ void main() {
       LibraryFilter.heard.matches(const ShelfRow(
           articleId: 'a',
           title: 'a',
-          topic: 't',
+          keywords: <String>['t'],
           meta: '',
           reads: 0,
           listens: 3,
@@ -317,10 +321,21 @@ void main() {
           isLive: false,
           isGone: false)));
 
-  // search matches title AND topic
-  check('search finds by title',
-      lib.search('pointer', LibraryFilter.all).length == 1);
-  check('search finds by topic', lib.search('nvda', LibraryFilter.all).length == 1);
+  // Search matches the title AND the keywords.
+  //
+  // `pointer` is the case that shows both at once: "What a Pointer Really Is"
+  // matches on its TITLE, and "A Short Walk Through Git" matches on a KEYWORD
+  // its title never mentions. Two rows, two different reasons — which is the
+  // whole argument for keywords over a topic: a topic could only ever be one
+  // label the reader had already chosen, so `pointer` could never have found an
+  // article whose subject nobody had thought to name in advance.
+  check('search finds a title match and a keyword match',
+      lib.search('pointer', LibraryFilter.all).length == 2,
+      'got ${lib.search('pointer', LibraryFilter.all).length}');
+  check('and a keyword alone is enough',
+      lib.search('memory', LibraryFilter.all).length == 1);
+  check('search still finds by title alone',
+      lib.search('nvda', LibraryFilter.all).length == 1);
   check('search finds nothing for nonsense',
       lib.search('zzzz', LibraryFilter.all).isEmpty);
 
@@ -388,28 +403,69 @@ void main() {
   section('the plan is data, and a rewrite is a diff');
   const ReadingPlan plan = ReadingPlan(
     reader: 'developer, new to finance English',
-    topics: <String>['C language', 'NVDA'],
     avoid: <String>['background before the point'],
-    length: 300,
     raw: 'keep sentences short',
   );
-  check('fields are readable', plan.fieldsSet == 3,
+  check('fields are readable', plan.fieldsSet == 2,
       'got ${plan.fieldsSet}');
   check('the prompt carries the structured fields',
-      plan.toPrompt().contains('Topics may come from'));
+      plan.toPrompt().contains('The reader is'));
   check('and the reader\'s own words verbatim',
       plan.toPrompt().contains('keep sentences short'));
   check('an empty plan reports nothing set',
       const ReadingPlan().fieldsSet == 0);
 
+  // The plan governs HOW an article reads and no longer says anything about
+  // WHAT it is about. `topics` is gone: the subject is either the writer's
+  // choice or a sentence the reader typed on the card, and a standing list of
+  // permitted subjects was configuration pretending to be content.
+  check('the plan names no subjects',
+      !plan.toPrompt().toLowerCase().contains('topic'));
+  check('and the field is not merely empty — it does not exist',
+      !PlanField.values.any((PlanField f) => f.name == 'topics'));
+
+  // SEVEN fields now: four keyword fields and three lengths. Derived, so
+  // removing one cannot leave a screen still saying "of 8".
+  check('the plan has seven fields', ReadingPlan.fieldCount == 7,
+      'got ${ReadingPlan.fieldCount}');
+  check('four keyword fields', PlanField.keywords.length == 4);
+  check('three length fields', PlanField.lengths.length == 3);
+  check('and the two groups are the whole enum',
+      PlanField.keywords.length + PlanField.lengths.length ==
+          PlanField.values.length);
+
+  // Length is a BAND, not a number. A reader who changed only the medium band
+  // has set one field, not three.
+  const ReadingPlan banded = ReadingPlan(mediumWords: 240);
+  check('changing one band sets one field', banded.fieldsSet == 1,
+      'got ${banded.fieldsSet}');
+  check('and the other two stay at the recommendation',
+      banded.shortWords == kShortWords && banded.longWords == kLongWords);
+  check('a band reads its length off the plan',
+      banded.wordsFor(LengthBand.medium) == 240);
+  check('a number that matches no band is custom',
+      banded.bandFor(275) == LengthBand.custom);
+  check('and one that matches a band is that band',
+      banded.bandFor(240) == LengthBand.medium);
+
+  // The prompt states all three bands and — crucially — no mark target. Asking
+  // for a fixed number of marked words is what made the writer pad the list.
+  final String planPrompt = plan.toPrompt();
+  check('the prompt states three lengths',
+      planPrompt.contains('$kShortWords') &&
+          planPrompt.contains('$kMediumWords') &&
+          planPrompt.contains('$kLongWords'));
+  check('and names no number of words to mark',
+      !planPrompt.toLowerCase().contains('marked'));
+
   // a stale diff must not be appliable
   final PlanRewrite rewrite = PlanRewrite(
-    proposal: plan.copyWith(length: 240),
+    proposal: plan.copyWith(mediumWords: 240),
     changes: const <PlanChange>[
-      PlanChange(field: PlanField.length, was: '300', now: '240'),
+      PlanChange(field: PlanField.lengthMedium, was: '300', now: '240'),
     ],
   );
-  check('a fresh diff can be accepted', rewrite.apply().length == 240);
+  check('a fresh diff can be accepted', rewrite.apply().mediumWords == 240);
   rewrite.invalidate();
   var refused = false;
   try {
@@ -419,6 +475,136 @@ void main() {
   }
   check('an invalidated diff is refused', refused);
   check('and it says why', rewrite.isStale);
+
+  // ── the instruction: optional, and its absence is the normal case ─────
+  section('an instruction is optional, and empty is a state not a gap');
+
+  // The default slot asks for nothing. That is not missing data — it is the
+  // ordinary case, and the card has to render it as a NAME rather than a blank.
+  final QueueSlot free = _planned('p1');
+  check('a fresh plan is a free pick', free.isFreePick);
+  check('and it still has something to say at the top',
+      free.subjectLabel == 'Anything', 'got ${free.subjectLabel}');
+  check('and it says who chose', free.subjectNote.contains('writer'));
+  check('and it carries no instruction id', free.instructionId == null);
+
+  // A hand-typed instruction.
+  final Queue q2 = Queue(<QueueSlot>[_planned('p2'), _ready('r1'), _ready('r2')]);
+  q2.editPlan(0, instruction: 'explain how a limit order fills');
+  check('an instruction is kept verbatim',
+      q2.slots[0].instruction == 'explain how a limit order fills');
+  check('and it is no longer a free pick', !q2.slots[0].isFreePick);
+  check('and the card shows it', q2.slots[0].subjectLabel.startsWith('explain'));
+  check('and it is labelled as the reader\'s own',
+      q2.slots[0].subjectNote == 'your instruction');
+
+  // Typing a new instruction must CLEAR a previously saved id. Otherwise the
+  // card keeps claiming it came from a saved instruction, and a later edit to
+  // that saved one would look like it applied here.
+  q2.editPlan(0, instruction: 'a story about a lighthouse', instructionId: 'i7',
+      fromSaved: true);
+  check('a saved instruction records where it came from',
+      q2.slots[0].instructionId == 'i7');
+  q2.editPlan(0, instruction: 'something else entirely');
+  check('typing a new one clears the saved id',
+      q2.slots[0].instructionId == null);
+
+  // Reroll means "not this, something else" — so it clears the instruction.
+  // Keeping the reader's sentence and changing only the length would be a
+  // reroll that rerolls nothing.
+  final QueueSlot rolled = q2.reroll(0, _planned('x'))!;
+  check('a reroll clears the instruction', rolled.isFreePick);
+  check('and it is still a free pick on the card', rolled.subjectLabel == 'Anything');
+
+  // The instruction type itself.
+  const Instruction ins = Instruction(
+      id: 'i1', text: 'write about NVDA', createdDay: '2026-10-01');
+  check('an unused instruction sorts by when it was written',
+      ins.sortDay == '2026-10-01');
+  check('a used one sorts by when it was last used',
+      ins.copyWith(lastUsedDay: '2026-10-07').sortDay == '2026-10-07');
+  check('and the count is carried',
+      ins.copyWith(useCount: 3).useCount == 3);
+  check('a long instruction is truncated for a chip',
+      const Instruction(
+              id: 'i2',
+              text: 'explain how a limit order fills, for someone who has '
+                  'never traded anything at all in their life',
+              createdDay: '2026-10-01')
+          .chipLabel(max: 30)
+          .endsWith('…'));
+  check('and a short one is left alone',
+      ins.chipLabel() == 'write about NVDA');
+
+  // ── difficulty: a fact about the TEXT, computed after the fact ─────────
+  section('difficulty is measured, not requested');
+  check('an empty text has no band', difficultyOf(unknownTokens: 0, totalTokens: 0) == null);
+  check('nothing unknown is easy',
+      difficultyOf(unknownTokens: 0, totalTokens: 300) == Difficulty.easy);
+  check('1 in 50 is the easy line',
+      difficultyOf(unknownTokens: 6, totalTokens: 300) == Difficulty.easy);
+  check('1 in 50 plus one is medium',
+      difficultyOf(unknownTokens: 7, totalTokens: 300) == Difficulty.medium);
+  check('1 in 20 is still medium',
+      difficultyOf(unknownTokens: 15, totalTokens: 300) == Difficulty.medium);
+  check('1 in 20 plus one is hard',
+      difficultyOf(unknownTokens: 16, totalTokens: 300) == Difficulty.hard);
+  check('the lines are the published ones',
+      kEasyMax == 0.02 && kMediumMax == 0.05);
+
+  // Counted in RUNNING WORDS: a word the reader does not know is unknown every
+  // time it appears, not only the first time.
+  check('a word counts once per appearance',
+      countUnknownTokens('a pointer and another pointer', <String>{'pointer'}) == 2);
+  check('and an unmarked word costs nothing',
+      countUnknownTokens('a pointer and another pointer', <String>{'heap'}) == 0);
+  check('case is not a distinction',
+      countUnknownTokens('Pointers point', <String>{'pointers'}) == 1);
+  check('tokens are the same unit the word count uses',
+      countTokens('A sentence of English text.') == 5);
+
+  // The cap is a defensive ceiling, NOT a setting, and it can never change a
+  // band: Hard begins at 1 mark per 20 words and the cap allows 1 per 4.
+  check('the mark cap is far above the hard line',
+      markCapFor(300) == 75 && markCapFor(300) > 300 * kMediumMax,
+      'got ${markCapFor(300)}');
+  check('and it has a floor and a ceiling',
+      markCapFor(0) == 20 && markCapFor(100000) == 600);
+
+  section('Restoring the plan means the defaults, and the button can tell');
+  {
+    // The Settings button is DISABLED when the plan already equals a fresh one.
+    // That is a structural comparison, so it only works if `ReadingPlan` has
+    // value equality — and if it does not, the button is silently always
+    // enabled and the "nothing to restore" line never appears. Cheap to check,
+    // and the failure is invisible on screen.
+    const ReadingPlan fresh = ReadingPlan();
+    check('a fresh plan equals a freshly built one',
+        fresh == const ReadingPlan());
+    check('and a plan with one field set does not',
+        fresh != const ReadingPlan(reader: 'a developer'));
+
+    check('the seven fields start empty',
+        fresh.reader.isEmpty &&
+            fresh.style.isEmpty &&
+            fresh.gloss.isEmpty &&
+            fresh.avoid.isEmpty &&
+            fresh.raw.isEmpty);
+    check('and the three lengths start at the recommendations',
+        fresh.shortWords == kShortWords &&
+            fresh.mediumWords == kMediumWords &&
+            fresh.longWords == kLongWords);
+    check('a fresh plan counts as nothing set', fresh.fieldsSet == 0);
+
+    // Restoring must not be a no-op on a plan that was actually changed.
+    const ReadingPlan edited = ReadingPlan(
+      reader: 'a developer',
+      style: <String>['short sentences'],
+      mediumWords: 420,
+    );
+    check('an edited plan counts as set', edited.fieldsSet > 0);
+    check('and differs from the defaults', edited != fresh);
+  }
 
   // ── summary ───────────────────────────────────────────────────────────
   print('');

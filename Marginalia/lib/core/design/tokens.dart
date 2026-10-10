@@ -13,8 +13,13 @@
 import 'package:flutter/material.dart';
 
 /// The two surfaces. There is no day/night SWITCH — the day/night distinction
-/// was removed, not renamed (invariant 5). This is a one-time appearance
-/// choice, living in Settings → The small print, with no time semantics.
+/// was removed, not renamed (invariant 5). A reader picks one, or asks the app
+/// to follow the phone; nothing here is ever chosen by a clock.
+///
+/// [brightness] is a FIELD rather than a comparison against [warmInk], because
+/// the comparison was an identity check dressed up as a rule: it read "is this
+/// the dark palette" and answered a question about one particular constant. A
+/// third palette would have silently been treated as light.
 ///
 /// The OKLCH values from the prototype were converted to sRGB because Flutter
 /// 3.44 has no OKLCH in its ColorSpace enum (`sRGB`, `extendedSRGB`,
@@ -25,6 +30,7 @@ import 'package:flutter/material.dart';
 class Palette {
   const Palette({
     required this.name,
+    required this.brightness,
     required this.paper,
     required this.paperSunk,
     required this.surface,
@@ -44,6 +50,11 @@ class Palette {
   });
 
   final String name;
+
+  /// Light or dark. Read by `MarginaliaTheme.themeFor` to pick the Material
+  /// brightness, and by `main()` to flip the status-bar icons — which have to
+  /// invert with the surface or they disappear into it.
+  final Brightness brightness;
 
   /// Page background. oklch(97.4% .014 84) / oklch(21% .018 66)
   final Color paper;
@@ -94,6 +105,7 @@ class Palette {
 
   static const warmPaper = Palette(
     name: 'warm paper',
+    brightness: Brightness.light,
     paper: Color(0xFFFBF6EC),
     paperSunk: Color(0xFFF2EBDF),
     surface: Color(0xFFFFFDF9),
@@ -127,6 +139,7 @@ class Palette {
   /// The prototype's default: one warm low-glare ink for night and long reads.
   static const warmInk = Palette(
     name: 'warm ink',
+    brightness: Brightness.dark,
     paper: Color(0xFF1E1710),
     paperSunk: Color(0xFF271F16),
     surface: Color(0xFF292119),
@@ -194,6 +207,155 @@ abstract final class TypeScale {
   static const FontWeight medium = FontWeight.w500;
   static const FontWeight semibold = FontWeight.w600;
   static const FontWeight bold = FontWeight.w700;
+}
+
+/// Which surface to show. Three answers, and "system" is the default because a
+/// phone that has already been told what its owner prefers should not be asked
+/// again.
+///
+/// This is not a day/night switch. Nothing in the app consults a clock; the
+/// only thing that can change the surface on its own is the PHONE's own
+/// setting, which is a thing the reader chose somewhere else.
+enum AppearanceMode {
+  light('Light'),
+  dark('Dark'),
+  system('Follow the phone');
+
+  const AppearanceMode(this.label);
+
+  final String label;
+
+  /// The palette for this mode, given what the phone currently says.
+  Palette paletteFor(Brightness platform) => switch (this) {
+        AppearanceMode.light => Palette.warmPaper,
+        AppearanceMode.dark => Palette.warmInk,
+        AppearanceMode.system =>
+          platform == Brightness.dark ? Palette.warmInk : Palette.warmPaper,
+      };
+}
+
+/// The face the ARTICLE is set in. A reading preference, and the only thing it
+/// touches is the body text — buttons, labels and data rows keep the three
+/// families in [TypeScale], because DESIGN §8's split between what is READ and
+/// what is OPERATED is not a matter of taste.
+///
+/// ## Why these six, and why the default is the one it is
+///
+/// Every article in this app is BILINGUAL: English sentences, Chinese
+/// translations. A face is only good here if the CHINESE beside it looks right
+/// too, and that is not a property of the Latin font at all — it is a property
+/// of what Android substitutes for the characters the Latin font does not have.
+///
+/// A bundled Latin font (Newsreader, the app's own reading serif) has no CJK
+/// glyphs, so Chinese falls through to the system's default: **Noto Sans CJK**,
+/// a sans. Serif English beside sans Chinese. That is what the app shipped
+/// with, and it is the reason this list is mostly SYSTEM families.
+///
+/// Android's `fonts.xml` answers the CJK question per family
+/// (`fallbackFor="serif"`), so:
+///
+///  · `serif`          → Noto Serif (Latin) + **Noto Serif CJK** — matched pair
+///  · `sans-serif`     → Roboto + **Noto Sans CJK** — matched pair
+///  · `source-sans-pro`→ Adobe's reading face; Noto Sans CJK is its sibling,
+///                        drawn by the same team to the same proportions
+///
+/// [notoSerif] is the default for that reason: it is the only option that is
+/// BOTH always present (it is in the AOSP baseline, unlike `source-sans-pro`)
+/// AND a matched serif pair, which is what DESIGN asks a reading surface to be.
+enum ReadingFace {
+  notoSerif(
+    'Noto Serif',
+    'serif',
+    <String>[],
+    'Serif English with serif Chinese — the one pair that truly matches.',
+  ),
+  roboto(
+    'Roboto',
+    'sans-serif',
+    <String>[],
+    'The phone\'s own face. Clear letterforms, sans Chinese.',
+  ),
+  sourceSans(
+    'Source Sans',
+    'source-sans-pro',
+    <String>['sans-serif'],
+    'Adobe\'s reading face. Its Chinese sibling is Noto Sans CJK.',
+  ),
+  newsreader(
+    'Newsreader',
+    TypeScale.serif,
+    <String>['serif'],
+    'The app\'s own reading serif. Chinese falls back to the phone\'s sans.',
+  ),
+  condensed(
+    'Roboto Condensed',
+    'sans-serif-condensed',
+    <String>['sans-serif'],
+    'Narrower, so more words fit on a line.',
+  ),
+  mono(
+    'Roboto Mono',
+    'monospace',
+    <String>['sans-serif'],
+    'Every letter the same width. Useful for telling shapes apart.',
+  );
+
+  const ReadingFace(this.label, this.family, this.fallback, this.note);
+
+  /// Shown verbatim on the row.
+  final String label;
+
+  /// Passed to `TextStyle.fontFamily`.
+  final String family;
+
+  /// Tried in order when [family] is not on the device.
+  ///
+  /// Not decoration: `source-sans-pro` is NOT in the AOSP baseline, so on a
+  /// phone without it the row would look like it did nothing. Naming the
+  /// system sans as the fallback makes it degrade to a face that is there.
+  final List<String> fallback;
+
+  /// One line under the row, saying what the reader gets.
+  final String note;
+
+  /// The style an article's body is set in.
+  TextStyle style(Color color, double size, {double? height}) => TextStyle(
+        fontFamily: family,
+        fontFamilyFallback: fallback.isEmpty ? null : fallback,
+        fontSize: size,
+        color: color,
+        height: height,
+      );
+
+  /// Read the current face off the widget tree.
+  static ReadingFace of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ReadingFaceScope>()?.face ??
+      ReadingFace.notoSerif;
+}
+
+/// Carries [ReadingFace] down the tree.
+///
+/// An InheritedWidget rather than a parameter, because the alternative is
+/// threading a font choice through every screen, sheet and sentence widget that
+/// happens to draw body text — and the ones that would be forgotten are exactly
+/// the ones nobody looks at twice.
+class ReadingFaceScope extends InheritedWidget {
+  const ReadingFaceScope({
+    super.key,
+    required this.face,
+    required super.child,
+  });
+
+  final ReadingFace face;
+
+  @override
+  bool updateShouldNotify(ReadingFaceScope old) => old.face != face;
+}
+
+extension ReadingFaceContext on BuildContext {
+  /// The reading face in force. Defaults to [ReadingFace.notoSerif] outside a
+  /// scope, so a widget shown in isolation still renders.
+  ReadingFace get readingFace => ReadingFace.of(this);
 }
 
 /// The prototype's `--t-*` ladder: a 1.25–1.3 modular scale. The `clamp()`
@@ -299,7 +461,7 @@ class MarginaliaTheme extends ThemeExtension<MarginaliaTheme> {
     final TextTheme t = _textTheme(p);
     return ThemeData(
       useMaterial3: true,
-      brightness: p == Palette.warmInk ? Brightness.dark : Brightness.light,
+      brightness: p.brightness,
       scaffoldBackgroundColor: p.paper,
       canvasColor: p.paper,
       textTheme: t,

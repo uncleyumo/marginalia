@@ -25,7 +25,7 @@ class ShelfRow {
   const ShelfRow({
     required this.articleId,
     required this.title,
-    required this.topic,
+    this.keywords = const <String>[],
     required this.meta,
     required this.reads,
     required this.listens,
@@ -40,11 +40,21 @@ class ShelfRow {
   final String articleId;
 
   final String title;
-  final String topic;
+
+  /// What the article is about, in the writer's own three to six words.
+  ///
+  /// This is what the shelf searches on, and what it shows for an archived row.
+  /// It replaced `topic` — a single label the reader had to maintain in advance,
+  /// which is exactly the thing that stopped being worth keeping.
+  ///
+  /// Empty for a row written before keywords existed, and for an article whose
+  /// writer did not return any. Both are normal; the row falls back to the word
+  /// `archived`.
+  final List<String> keywords;
 
   /// The quiet line under the title: length and time. Deliberately does NOT
-  /// repeat the topic — a topic badge beside a title that already says it is
-  /// noise, and DESIGN's shelf rule is one title line, one meta line, numbers
+  /// repeat the keywords — a keyword badge beside a title that already says it
+  /// is noise, and DESIGN's shelf rule is one title line, one meta line, numbers
   /// in a fixed column, state on the spine.
   final String meta;
 
@@ -115,7 +125,7 @@ class Library {
       seen[e.title] = ShelfRow(
         articleId: e.articleId,
         title: e.title,
-        topic: e.topic,
+        keywords: e.keywords,
         meta: '',
         reads: e.reads,
         listens: e.listens,
@@ -133,7 +143,7 @@ class Library {
           ShelfRow(
             articleId: a.id,
             title: a.title,
-            topic: a.topic,
+            keywords: a.keywords,
             meta: '',
             reads: 0,
             listens: 0,
@@ -145,7 +155,9 @@ class Library {
       seen[a.title] = ShelfRow(
         articleId: existing.articleId.isEmpty ? a.id : existing.articleId,
         title: a.title,
-        topic: existing.topic.isEmpty ? a.topic : existing.topic,
+        // The live article wins: it is in memory, it was written by the writer
+        // that is running now, and a ledger row may predate keywords entirely.
+        keywords: a.keywords.isNotEmpty ? a.keywords : existing.keywords,
         meta: '${a.wordCount} words · ${a.minuteEstimate} min',
         // a live article's bytes come from the ledger if it has one
         reads: existing.reads,
@@ -175,15 +187,20 @@ class Library {
     return rows;
   }
 
-  /// Search matches title AND topic — the reader types "pointer" or "NVDA" or
-  /// "music" and the shelf narrows as they type.
+  /// Search matches the title AND the keywords — the reader types "pointer" or
+  /// "memory" or "music" and the shelf narrows as they type.
+  ///
+  /// Keywords are a better search key than a topic ever was: a topic was one
+  /// label the reader had to have chosen, while keywords are several words the
+  /// writer produced, so `pointer` finds an article whose title never says it.
   List<ShelfRow> search(String query, LibraryFilter filter) {
     final String q = query.trim().toLowerCase();
     return shelf()
         .where((ShelfRow r) => filter.matches(r))
         .where((ShelfRow r) =>
-            q.isEmpty || r.title.toLowerCase().contains(q) ||
-            r.topic.toLowerCase().contains(q))
+            q.isEmpty ||
+            r.title.toLowerCase().contains(q) ||
+            r.keywords.any((String k) => k.toLowerCase().contains(q)))
         .toList();
   }
 

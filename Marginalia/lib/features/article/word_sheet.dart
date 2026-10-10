@@ -20,6 +20,7 @@
 // is not in the shipped dictionary is a fact to say out loud, not a gap to paper
 // over with a network call.
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/design/tokens.dart';
@@ -47,6 +48,7 @@ class WordSheet extends StatefulWidget {
     required this.onSpeak,
     this.lemma,
     this.weightFraction,
+    this.dictionary,
   });
 
   final String surface;
@@ -64,6 +66,12 @@ class WordSheet extends StatefulWidget {
   /// How likely this word is to be picked again. NOT a promise about which day.
   final double? weightFraction;
 
+  /// The offline dictionary, when it has loaded. Words inside the English gloss
+  /// look themselves up in it — the same one the main lookup uses, so a gloss
+  /// word answers the same way a tapped word does, and equally offline. Null
+  /// while the first inflate is still running.
+  final Dictionary? dictionary;
+
   @override
   State<WordSheet> createState() => _WordSheetState();
 }
@@ -72,12 +80,54 @@ class _WordSheetState extends State<WordSheet> {
   late bool _starred = widget.starred;
   bool _showChinese = false;
 
+  /// The gloss word whose Chinese panel is open. `cn` and `note` are mutually
+  /// exclusive: one carries the translation, the other says why there is none.
+  /// A panel with neither would read as the app being broken.
+  ({String word, String? cn, String? note})? _gloss;
+
   void _star() {
     // Flip locally first. The parent's write goes to the database and comes back
     // through a rebuild it may not have time to do; the reader has already
     // tapped, so the sheet must answer on this frame.
     setState(() => _starred = !_starred);
     widget.onToggleStar(_starred);
+  }
+
+  /// Look up a word tapped inside the English gloss. ONE step only — the panel
+  /// this opens is plain text, because a translation of a translation is where
+  /// a lookup stops being an answer and starts being a maze.
+  void _tapGloss(String word) {
+    final String key = word.toLowerCase();
+    // Tapping the open word again closes it. The panel has its own close
+    // control, but a tap that can only ever open teaches the reader to stop
+    // tapping.
+    if (_gloss?.word.toLowerCase() == key) {
+      setState(() => _gloss = null);
+      return;
+    }
+    final Dictionary? dict = widget.dictionary;
+    if (dict == null) {
+      setState(() => _gloss = (
+            word: word,
+            cn: null,
+            note: 'The dictionary is still loading.',
+          ));
+      return;
+    }
+    final (DictEntry? entry, _) = dict.lookup(word);
+    setState(() {
+      if (entry == null || !entry.hasChinese) {
+        _gloss = (
+          word: word,
+          cn: null,
+          note: entry == null
+              ? 'Not in the offline dictionary.'
+              : 'This entry carries no Chinese.',
+        );
+      } else {
+        _gloss = (word: word, cn: entry.cn, note: null);
+      }
+    });
   }
 
   @override
@@ -166,18 +216,124 @@ class _WordSheetState extends State<WordSheet> {
     );
   }
 
-  /// The English gloss, on top, in serif, at reading size.
+  /// Words inside the gloss. Same shape the article's sentences use: a run of
+  /// letters is tappable, the spaces and punctuation between them are not.
+  static final RegExp _glossWord = RegExp(r"[A-Za-z][A-Za-z'\-]*");
+
+  /// The English gloss, on top, in serif, at reading size — with every word in
+  /// it a doorway to the same offline dictionary the main lookup uses.
   Widget _english(Palette c) {
+    final String gloss = widget.entry.en;
+    final TextStyle style = TextStyle(
+      fontFamily: TypeScale.serif,
+      fontSize: 16,
+      height: 1.65,
+      color: c.ink,
+    );
+
+    final List<TextSpan> children = <TextSpan>[];
+    int cursor = 0;
+    for (final RegExpMatch m in _glossWord.allMatches(gloss)) {
+      if (m.start > cursor) {
+        children.add(TextSpan(text: gloss.substring(cursor, m.start)));
+      }
+      final String word = m.group(0)!;
+      // The word whose panel is open is inked vermilion — the same "this is the
+      // one you asked about" the rest of the app uses for an active thing, and
+      // the only feedback a span can give without a box drawn around it.
+      final bool open = _gloss?.word.toLowerCase() == word.toLowerCase();
+      children.add(TextSpan(
+        text: word,
+        style: open ? style.copyWith(color: c.vermInk) : null,
+        recognizer: TapGestureRecognizer()..onTap = () => _tapGloss(word),
+      ));
+      cursor = m.end;
+    }
+    if (cursor < gloss.length) {
+      children.add(TextSpan(text: gloss.substring(cursor)));
+    }
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 13),
-      child: Text(
-        widget.entry.en,
-        style: TextStyle(
-          fontFamily: TypeScale.serif,
-          fontSize: 16,
-          height: 1.65,
-          color: c.ink,
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text.rich(TextSpan(style: style, children: children)),
+          if (_gloss != null) _glossPanel(c),
+        ],
+      ),
+    );
+  }
+
+  /// The Chinese-only panel under a tapped gloss word. Deliberately minimal —
+  /// the word, the meaning, a way out — and NOT tappable itself: translation
+  /// depth is capped at two, and this panel is the second step.
+  Widget _glossPanel(Palette c) {
+    final ({String word, String? cn, String? note}) g = _gloss!;
+    return Container(
+      margin: const EdgeInsets.only(top: 9),
+      padding: const EdgeInsets.fromLTRB(12, 9, 8, 6),
+      decoration: BoxDecoration(
+        color: c.paperSunk,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: c.hair),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  g.word,
+                  style: TextStyle(
+                    fontFamily: TypeScale.sans,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: c.ink,
+                  ),
+                ),
+              ),
+              // An X rather than a word: the sheet's chrome is English-only,
+              // and a symbol is a close button in every script at once.
+              InkWell(
+                onTap: () => setState(() => _gloss = null),
+                borderRadius: BorderRadius.circular(7),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(Icons.close, size: 15, color: c.ink3),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          if (g.cn != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 5),
+              child: Text(
+                g.cn!,
+                style: TextStyle(
+                  fontFamily: TypeScale.serif,
+                  fontSize: 14.5,
+                  height: 1.7,
+                  color: c.ink,
+                ),
+              ),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.only(bottom: 5),
+              child: Text(
+                g.note ?? '',
+                style: TextStyle(
+                  fontFamily: TypeScale.sans,
+                  fontSize: 12,
+                  height: 1.4,
+                  color: c.ink3,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -464,6 +620,7 @@ Future<void> showWordSheet(
   required VoidCallback onSpeak,
   String? lemma,
   double? weightFraction,
+  Dictionary? dictionary,
 }) {
   return AppSheet.show<void>(
     context,
@@ -476,6 +633,7 @@ Future<void> showWordSheet(
       onSpeak: onSpeak,
       lemma: lemma,
       weightFraction: weightFraction,
+      dictionary: dictionary,
     ),
   );
 }

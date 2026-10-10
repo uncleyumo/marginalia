@@ -75,7 +75,9 @@ class ArticleScreen extends StatefulWidget {
     required this.onCountRead,
     required this.speakingIndex,
     required this.onSpeakSentence,
-    this.counted = false,
+    this.readsToday = 0,
+    this.readsInAll = 0,
+    this.counting = false,
     this.fromLibrary = false,
     this.ledgerMeta,
     required this.onBack,
@@ -93,9 +95,24 @@ class ArticleScreen extends StatefulWidget {
   /// anywhere on this screen, and there is deliberately no "done" affordance.
   final VoidCallback onCountRead;
 
+  /// How many times this article has been read today, and in all. Both are
+  /// read from the database when the screen opens, so coming back tomorrow does
+  /// not look the same as never having been here.
+  ///
+  /// [readsToday] is what makes the button a live control rather than a dead
+  /// one: the reader presses it and a number on the screen changes, which is
+  /// the only thing that tells them the press landed.
+  final int readsToday;
+  final int readsInAll;
+
+  /// A count is being written. The button spins and refuses a second press —
+  /// the same contract as `Write it` on a card, and for the same reason: a
+  /// control that looks identical before and after a tap gets tapped again.
+  final bool counting;
+
   /// Already counted today. The button re-arms either way: reading twice is
   /// normal, and an article the reader returns to is the whole point.
-  final bool counted;
+  bool get counted => readsToday > 0;
 
   /// Opened from the shelf rather than the queue, so the header says so and the
   /// counts are the archived ones.
@@ -165,12 +182,10 @@ class _ArticleScreenState extends State<ArticleScreen> {
         children: <Widget>[
           _header(context, c),
           const SizedBox(height: 18),
-          Text(
-            widget.article.title,
-            // The article title is the one thing on this screen that should feel
-            // like a title. `texts.titleLarge` is nullable because it comes off a
-            // TextTheme, so the size is read defensively rather than with `!` at
-            // three call sites.
+          // The title is the first thing a reader meets and often the hardest
+          // words in the piece. Its words are tappable, same lookup as the body.
+          _TappableTitle(
+            text: widget.article.title,
             style: TextStyle(
               fontFamily: TypeScale.serif,
               fontSize: (context.texts.titleLarge?.fontSize ?? 21) + 3,
@@ -179,15 +194,32 @@ class _ArticleScreenState extends State<ArticleScreen> {
               letterSpacing: -0.02,
               color: c.ink,
             ),
+            onWordTap: (String w) => widget.onWordTap(w, -1),
           ),
+          // The Chinese title, when the writer produced one. Empty is normal
+          // for older articles — the tappable words above still work.
+          if (widget.article.titleCn.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              widget.article.titleCn,
+              style: TextStyle(
+                fontFamily: TypeScale.serif,
+                fontSize: 15,
+                height: 1.5,
+                color: c.ink2,
+              ),
+            ),
+          ],
           const SizedBox(height: 5),
+          // What this is about, in the writer's own words. The same mono line
+          // the card carries, so the article and the card that led to it agree.
           Text(
-            widget.article.focus.isEmpty
-                ? widget.article.topic
-                : '${widget.article.topic} · ${widget.article.focus}',
+            widget.article.keywords.isEmpty
+                ? 'no keywords'
+                : widget.article.keywords.join(' · '),
             style: TextStyle(
-              fontFamily: TypeScale.sans,
-              fontSize: 12,
+              fontFamily: TypeScale.mono,
+              fontSize: 11,
               color: c.ink3,
             ),
           ),
@@ -234,7 +266,17 @@ class _ArticleScreenState extends State<ArticleScreen> {
         ),
         const Spacer(),
         Text(
-          '${widget.article.wordCount} words · ${widget.article.minuteEstimate} min',
+          // Same line, same mono, same quiet colour as the card. The label is
+          // an estimate of the TEXT — the words the writer thought would be
+          // hard — and Settings → The small print says so at length. What it
+          // is not is a verdict on the reader, which is why it sits with the
+          // word count rather than anywhere it could be mistaken for a score.
+          <String>[
+            '${widget.article.wordCount} words',
+            '${widget.article.minuteEstimate} min',
+            if (widget.article.difficulty != null)
+              widget.article.difficulty!.label,
+          ].join(' · '),
           style: TextStyle(
             fontFamily: TypeScale.mono,
             fontSize: 10.5,
@@ -349,6 +391,42 @@ class _ArticleScreenState extends State<ArticleScreen> {
     );
   }
 
+  /// What the reader has actually done with this article, in one line.
+  ///
+  /// THIS LINE IS THE FEATURE. It used to be a static prompt — "finished
+  /// reading?" before, "counted. read it again and it will count again." after —
+  /// and the second one never appeared on a fresh visit, because the flag behind
+  /// it was never passed in. So the button behaved identically whether the
+  /// reader had counted the article four times or never: press it, read a toast
+  /// that fades in three seconds, and the screen is unchanged. The obvious
+  /// conclusion is that it did not work, and the obvious response is to press it
+  /// again.
+  ///
+  /// A number that changes is the only honest receipt. So the line states the
+  /// count, before and after, and it comes from the database rather than from
+  /// this session's memory.
+  String get _countLine {
+    if (widget.readsToday == 0) {
+      // Not counted today. The history still matters: an article the reader has
+      // been through four times should not greet them as a stranger.
+      if (widget.readsInAll == 0) return 'finished reading?';
+      return 'finished reading? · read ${_times(widget.readsInAll)} before, '
+          'not today';
+    }
+    if (widget.readsInAll <= 1) return 'counted · the first read';
+    return 'counted ${_times(widget.readsToday)} today · '
+        '${widget.readsInAll} in all';
+  }
+
+  /// `once` / `twice` / `4 times`. Words for the small numbers, because the line
+  /// is read as a sentence and `1 times` is the kind of thing that makes a
+  /// reader stop trusting the rest of the interface.
+  static String _times(int n) => switch (n) {
+        1 => 'once',
+        2 => 'twice',
+        _ => '$n times',
+      };
+
   /// The only button on this screen. It counts; it does not finish.
   ///
   /// DESIGN: "You read it. Count it? — it stays in your queue afterwards."
@@ -358,25 +436,30 @@ class _ArticleScreenState extends State<ArticleScreen> {
     return Column(
       children: <Widget>[
         Text(
-          widget.counted
-              ? 'counted. read it again and it will count again.'
-              : 'finished reading?',
+          _countLine,
+          textAlign: TextAlign.center,
           style: TextStyle(
             fontFamily: TypeScale.serif,
             fontSize: 13,
             fontStyle: FontStyle.italic,
-            color: c.ink3,
+            color: widget.counted ? c.ink2 : c.ink3,
           ),
         ),
         const SizedBox(height: 9),
         Btn(
-          label: widget.counted ? 'Count it again' : 'Count this read',
+          label: widget.counting
+              ? 'Counting…'
+              : widget.counted
+                  ? 'Count it again'
+                  : 'Count this read',
           primary: false,
+          busy: widget.counting,
           onPressed: widget.onCountRead,
         ),
         const SizedBox(height: 11),
         Text(
           'it stays in your queue. reading never removes anything.',
+          textAlign: TextAlign.center,
           style: TextStyle(
             fontFamily: TypeScale.sans,
             fontSize: 11.5,
@@ -535,12 +618,12 @@ class _SentenceView extends StatelessWidget {
         const SizedBox(height: 6),
         Text(
           sentence.chinese,
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 14.5,
-            height: 1.7,
-            color: c.ink2,
-          ),
+          // The translation is read, so it takes the reading face too. This is
+          // the line where the choice is most visible: a serif English
+          // sentence over sans Chinese is exactly what the reader is picking
+          // a face to avoid.
+          style: context.readingFace
+              .style(c.ink2, 14.5, height: 1.7),
         ),
       ],
     );
@@ -604,6 +687,7 @@ class _TappableSentence extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final Palette c = context.colors;
+    final ReadingFace face = context.readingFace;
     final Map<String, MarkTier> tiers = <String, MarkTier>{
       for (final Mark m in marks) m.surface.toLowerCase(): m.tier,
     };
@@ -612,20 +696,28 @@ class _TappableSentence extends StatelessWidget {
     int cursor = 0;
     for (final ({int start, int end, String word}) t in _tokens()) {
       if (t.start > cursor) {
-        spans.add(TextSpan(text: text.substring(cursor, t.start)));
+        // The gap carries the face too. It used to inherit whatever size the
+        // ambient default style happened to pick, which made punctuation a
+        // different size from the words around it — and made every caret
+        // measured by [_resolve] drift by a fraction of a glyph against what
+        // is actually on screen.
+        spans.add(TextSpan(
+          text: text.substring(cursor, t.start),
+          style: face.style(baseColor, sizePx, height: 1.86),
+        ));
       }
       final MarkTier? tier = tiers[t.word.toLowerCase()];
       spans.add(TextSpan(
         text: t.word,
-        style: TextStyle(
-          fontFamily: TypeScale.serif,
-          fontSize: sizePx,
-          height: 1.86,
-          color: switch (tier) {
+        style: face.style(
+          switch (tier) {
             MarkTier.unfamiliar => c.vermInk,
             MarkTier.difficult => c.jade,
             null => baseColor,
           },
+          sizePx,
+          height: 1.86,
+        ).copyWith(
           decoration: tier == null ? TextDecoration.none : TextDecoration.underline,
           decorationColor: tier == MarkTier.unfamiliar ? c.verm : c.jade,
           decorationThickness: 1.6,
@@ -633,14 +725,19 @@ class _TappableSentence extends StatelessWidget {
       ));
       cursor = t.end;
     }
-    if (cursor < text.length) spans.add(TextSpan(text: text.substring(cursor)));
+    if (cursor < text.length) {
+      spans.add(TextSpan(
+        text: text.substring(cursor),
+        style: face.style(baseColor, sizePx, height: 1.86),
+      ));
+    }
 
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapUp: (TapUpDetails d) =>
-              _resolve(d.localPosition, constraints.maxWidth),
+              _resolve(d.localPosition, constraints.maxWidth, face),
           // Long press is how a LINE is heard. A tap is a question about a word;
           // a press-and-hold is a question about the sentence around it, and the
           // two never compete for the same gesture.
@@ -653,57 +750,136 @@ class _TappableSentence extends StatelessWidget {
     );
   }
 
-  /// Which word was tapped, by asking a painter for the offset of each one.
+  /// Which word was tapped, by asking a painter that measured the ORIGINAL
+  /// sentence where the tap landed in the text.
   ///
   /// A miss still reports the nearest word rather than nothing: the reader
   /// pointed at the text, and answering with an empty card would read as the app
   /// being broken.
-  void _resolve(Offset position, double width) {
+  void _resolve(Offset position, double width, ReadingFace face) {
     final List<({int start, int end, String word})> tokens = _tokens();
     if (tokens.isEmpty) return;
 
-    // Build a painter with the same metrics this widget uses, then ask it where
-    // each word sits. A width of zero means the layout has not happened yet;
-    // fall back to the first word rather than crashing.
+    // Measure the original sentence, not a rebuild of it. Each token carries
+    // offsets into `text` — punctuation included — so a painter built from
+    // joined words would answer with carets that drift by every comma the
+    // rebuild dropped, and the rebuilt string also does not wrap the way this
+    // widget lays text out. One span, one style, the real text: then a caret
+    // asked for at a token's offset is the caret the reader is looking at.
+    //
+    // "ONE STYLE" NOW INCLUDES THE FACE. The painter has to be built with the
+    // same family as the text it is measuring: a different face has different
+    // advance widths, so every word would be measured at a position it does not
+    // occupy and taps would land one or two words away from where the reader
+    // pointed. That is why the face is a parameter here rather than read off
+    // the context — this method runs from a gesture, and the gesture's context
+    // is not the widget's.
     final TextPainter painter = TextPainter(
       text: TextSpan(
-        style: TextStyle(
-          fontFamily: TypeScale.serif,
-          fontSize: sizePx,
-          height: 1.86,
-        ),
-        children: <InlineSpan>[
-          for (final ({int start, int end, String word}) t in tokens)
-            TextSpan(text: '${t.word} '),
-        ],
+        text: text,
+        style: face.style(Colors.black, sizePx, height: 1.86),
       ),
       textDirection: TextDirection.ltr,
       textAlign: TextAlign.start,
     )..layout(maxWidth: width > 0 ? width : 400.0);
 
-    ({int start, int end, String word}) best = tokens.first;
-    double bestDx = double.infinity;
-    for (final ({int start, int end, String word}) t in tokens) {
-      final Offset dx = painter.getOffsetForCaret(
-        TextPosition(offset: t.start),
-        Rect.zero,
-      );
-      final Offset endDx = painter.getOffsetForCaret(
-        TextPosition(offset: t.end),
-        Rect.zero,
-      );
-      // the tap band runs from the word's start to the space after it
-      if (position.dx >= dx.dx - 3 && position.dx <= endDx.dx + 4) {
-        painter.dispose();
-        onWordTap(t.word);
-        return;
+    try {
+      // Ask where the tap landed in TEXT, then take the word under it. An x-only
+      // band test cannot tell line 2 from line 1 on a wrapped sentence: the same
+      // x exists on every line, so a tap on line 2 kept answering with whatever
+      // line 1 happened to put at that x.
+      final TextPosition caret = painter.getPositionForOffset(position);
+      final TextRange range = painter.getWordBoundary(caret);
+      if (range.isValid && !range.isCollapsed) {
+        for (final ({int start, int end, String word}) t in tokens) {
+          // Word boundaries and the tokenizer can split differently around
+          // apostrophes and hyphens; any overlap with a token is that token.
+          if (t.start < range.end && t.end > range.start) {
+            onWordTap(t.word);
+            return;
+          }
+        }
       }
-      if ((position.dx - dx.dx).abs() < bestDx) {
-        bestDx = (position.dx - dx.dx).abs();
-        best = t;
+
+      // Tap on whitespace or punctuation (or a boundary that matched no token).
+      // Nearest means nearest in BOTH axes, measured to the word's painted
+      // rects: a caret-rect test on x alone would still hand line 2's tap to a
+      // line-1 word sitting at the same x, and a wrapped word has its end caret
+      // to the LEFT of its start caret, which no start→end x band can contain.
+      ({int start, int end, String word}) best = tokens.first;
+      double bestDist = double.infinity;
+      for (final ({int start, int end, String word}) t in tokens) {
+        double wordDist = double.infinity;
+        final List<TextBox> boxes = painter.getBoxesForSelection(
+          TextSelection(baseOffset: t.start, extentOffset: t.end),
+        );
+        for (final TextBox box in boxes) {
+          final double dx = position.dx < box.left
+              ? box.left - position.dx
+              : position.dx > box.right
+                  ? position.dx - box.right
+                  : 0.0;
+          final double dy = position.dy < box.top
+              ? box.top - position.dy
+              : position.dy > box.bottom
+                  ? position.dy - box.bottom
+                  : 0.0;
+          // Squared distance: the comparison never needs the root.
+          final double d = dx * dx + dy * dy;
+          if (d < wordDist) wordDist = d;
+        }
+        if (wordDist < bestDist) {
+          bestDist = wordDist;
+          best = t;
+        }
       }
+      onWordTap(best.word);
+    } finally {
+      painter.dispose();
     }
-    painter.dispose();
-    onWordTap(best.word);
+  }
+}
+
+/// The title, with its words tappable for meaning.
+///
+/// A title is short and wraps little, so a Wrap of word runs is enough —
+/// unlike the body, there is no multi-line hit-test to get wrong. Punctuation
+/// and spaces are not targets. Same one-level lookup as every other word.
+class _TappableTitle extends StatelessWidget {
+  const _TappableTitle({
+    required this.text,
+    required this.style,
+    required this.onWordTap,
+  });
+
+  final String text;
+  final TextStyle style;
+  final void Function(String word) onWordTap;
+
+  static final RegExp _word = RegExp(r"[A-Za-z][A-Za-z'\-]*");
+
+  @override
+  Widget build(BuildContext context) {
+    final List<InlineSpan> spans = <InlineSpan>[];
+    int at = 0;
+    for (final Match m in _word.allMatches(text)) {
+      if (m.start > at) {
+        spans.add(TextSpan(text: text.substring(at, m.start)));
+      }
+      final String w = m.group(0)!;
+      spans.add(WidgetSpan(
+        baseline: TextBaseline.alphabetic,
+        style: style,
+        child: GestureDetector(
+          onTap: () => onWordTap(w),
+          child: Text(w, style: style),
+        ),
+      ));
+      at = m.end;
+    }
+    if (at < text.length) spans.add(TextSpan(text: text.substring(at)));
+    return RichText(
+      text: TextSpan(style: style, children: spans),
+    );
   }
 }

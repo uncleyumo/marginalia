@@ -79,6 +79,7 @@ class Btn extends StatelessWidget {
     this.primary = true,
     this.icon,
     this.dense = false,
+    this.busy = false,
   });
 
   final String label;
@@ -90,53 +91,79 @@ class Btn extends StatelessWidget {
   final String? icon;
   final bool dense;
 
+  /// The tap has been taken and the work has not finished.
+  ///
+  /// A button that looks the same before and after the tap is a button the
+  /// reader taps again — and on the queue screen a second tap is a second paid
+  /// request, because the slot is still `planned` until the article lands. So
+  /// `busy` draws the receipt: the glyph becomes a spinner, the label says what
+  /// is happening, and [onPressed] is forced to null so the second tap cannot
+  /// reach the network even if the caller forgot to guard it.
+  final bool busy;
+
   @override
   Widget build(BuildContext context) {
     final Palette c = context.colors;
     final Color bg = primary ? c.verm : c.surface;
     final Color fg = primary ? c.paper : c.ink;
+    // Dimmed while busy, because a disabled control that looks fully enabled is
+    // the thing this parameter exists to prevent.
+    final double alpha = busy ? 0.72 : 1.0;
     return SizedBox(
       width: double.infinity,
-      child: Material(
-        color: bg,
-        borderRadius: BorderRadius.circular(14),
-        child: InkWell(
-          onTap: onPressed,
+      child: Opacity(
+        opacity: alpha,
+        child: Material(
+          color: bg,
           borderRadius: BorderRadius.circular(14),
-          child: Container(
-            decoration: primary
-                ? null
-                : BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: c.hair),
-                  ),
-            padding: EdgeInsets.symmetric(
-              vertical: dense ? 10 : 13,
-              horizontal: 12,
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                if (icon != null) ...<Widget>[
-                  Text(icon!, style: TextStyle(color: fg, fontSize: 14)),
-                  const SizedBox(width: 8),
-                ],
-                Flexible(
-                  child: Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: TypeScale.sans,
-                      fontSize: dense ? 13.5 : 15,
-                      fontWeight: FontWeight.w700,
-                      color: fg,
+          child: InkWell(
+            onTap: busy ? null : onPressed,
+            borderRadius: BorderRadius.circular(14),
+            child: Container(
+              decoration: primary
+                  ? null
+                  : BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: c.hair),
+                    ),
+              padding: EdgeInsets.symmetric(
+                vertical: dense ? 10 : 13,
+                horizontal: 12,
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  if (busy) ...<Widget>[
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(fg),
+                      ),
+                    ),
+                    const SizedBox(width: 9),
+                  ] else if (icon != null) ...<Widget>[
+                    Text(icon!, style: TextStyle(color: fg, fontSize: 14)),
+                    const SizedBox(width: 8),
+                  ],
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: TypeScale.sans,
+                        fontSize: dense ? 13.5 : 15,
+                        fontWeight: FontWeight.w700,
+                        color: fg,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -279,13 +306,21 @@ class Pill extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Text(
-                text,
-                style: TextStyle(
-                  fontFamily: mono ? TypeScale.mono : TypeScale.sans,
-                  fontSize: 11,
-                  color: fg,
-                  fontWeight: mono ? FontWeight.w400 : FontWeight.w600,
+              // Flexible, because a pill's text is not always short enough for
+              // one line. Inside a `Wrap` the Row is capped at the available
+              // width, and without this a long label overflows its own chip —
+              // "Never start with background — go straight to the point" did,
+              // by 1.8 pixels, which is the kind of number that grows the
+              // moment somebody changes a font.
+              Flexible(
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    fontFamily: mono ? TypeScale.mono : TypeScale.sans,
+                    fontSize: 11,
+                    color: fg,
+                    fontWeight: mono ? FontWeight.w400 : FontWeight.w600,
+                  ),
                 ),
               ),
               if (trailing != null) ...<Widget>[
@@ -354,6 +389,52 @@ class AppSheet extends StatelessWidget {
         closeLabel: closeLabel,
         onClose: () => Navigator.of(ctx).maybePop(),
         builder: builder,
+      ),
+    );
+  }
+
+  /// Show a sheet whose [locked] state can CHANGE while it is open.
+  ///
+  /// [show] takes `locked` as a value fixed at show time, which is right for a
+  /// sheet that asks one question before it does anything. It is wrong for the
+  /// plan editor: that sheet starts unlocked (the reader is typing a request),
+  /// and becomes locked the moment a PAID-FOR answer arrives and has not been
+  /// accepted yet. The state is a [ValueNotifier] the sheet body owns, and the
+  /// frame rebuilds from it.
+  ///
+  /// The cost of gating dynamically is that this sheet cannot be dragged away —
+  /// `enableDrag` has to be false from the start, because `showModalBottomSheet`
+  /// fixes it when the route is pushed. For a sheet that can be holding a
+  /// result somebody paid for, that is the behaviour we want anyway.
+  static Future<T?> showGated<T>(
+    BuildContext context, {
+    required WidgetBuilder builder,
+    required ValueNotifier<bool> locked,
+    String? title,
+    Widget? trailing,
+    String? lockMessage,
+    String? closeLabel,
+    bool useSafeArea = true,
+  }) {
+    return showModalBottomSheet<T>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: context.colors.ink.withValues(alpha: 0.5),
+      isDismissible: false,
+      enableDrag: false,
+      useSafeArea: useSafeArea,
+      builder: (BuildContext ctx) => ValueListenableBuilder<bool>(
+        valueListenable: locked,
+        builder: (BuildContext _, bool isLocked, Widget? __) => AppSheetFrame(
+          title: title,
+          trailing: trailing,
+          locked: isLocked,
+          lockMessage: lockMessage,
+          closeLabel: closeLabel,
+          onClose: () => Navigator.of(ctx).maybePop(),
+          builder: builder,
+        ),
       ),
     );
   }

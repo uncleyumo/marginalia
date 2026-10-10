@@ -73,6 +73,11 @@ class ListenScreen extends StatefulWidget {
     this.onSize,
     this.voiceLabel = '',
     this.audioHandler,
+    this.autoPlay = false,
+    this.active = true,
+    this.onWordTap,
+    this.onFinished,
+    this.onNextArticle,
   });
 
   final Article article;
@@ -98,6 +103,34 @@ class ListenScreen extends StatefulWidget {
   /// Which engine is speaking, stated in words rather than implied.
   final String voiceLabel;
 
+  /// Whether opening this screen starts speaking.
+  ///
+  /// Default OFF, and that is deliberate: a screen that starts talking the
+  /// moment it is opened surprises people in quiet rooms, and "surprised" is
+  /// the opposite of what a Listen tab is for. Combined with [active], it
+  /// means "when I switch to Listen, start" — not "when this widget happens
+  /// to be built underneath an IndexedStack".
+  final bool autoPlay;
+
+  /// Whether this screen is the one the reader is looking at.
+  ///
+  /// The Read/Listen switch keeps both children alive so the sentence index
+  /// survives a glance at Read. Auto-play must still only fire when Listen is
+  /// the tab in front, and only the first time.
+  final bool active;
+
+  /// Word meaning, same contract as the Read screen — including the fact that
+  /// a lookup is one tap deep and stops there.
+  final ValueChanged<String>? onWordTap;
+
+  /// The article played to its last sentence. Fires once per completed pass;
+  /// the caller is what decides whether that is a listen to count.
+  final VoidCallback? onFinished;
+
+  /// Skip to the next article in the auto-continue chain (or the queue).
+  /// Null when there is nothing to go to, and the control is then not drawn.
+  final VoidCallback? onNextArticle;
+
   @override
   State<ListenScreen> createState() => _ListenScreenState();
 }
@@ -114,7 +147,26 @@ class _ListenScreenState extends State<ListenScreen> {
   void initState() {
     super.initState();
     _attachTransport();
-    unawaited(_playCurrent());
+    // Only when the reader asked for it AND this screen is already in front.
+    // A parent that keeps this widget alive under an IndexedStack must not
+    // make the article start speaking from underneath the Read tab.
+    if (widget.autoPlay && widget.active) {
+      _autoStarted = true;
+      unawaited(_playCurrent());
+    }
+  }
+
+  /// One auto-start per screen. Flipping Read↔Listen must not replay the
+  /// article from the top every time — that was the "it talks at me" complaint.
+  bool _autoStarted = false;
+
+  @override
+  void didUpdateWidget(ListenScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.autoPlay && widget.active && !_autoStarted && !_playing) {
+      _autoStarted = true;
+      unawaited(_playCurrent());
+    }
   }
 
   @override
@@ -175,6 +227,10 @@ class _ListenScreenState extends State<ListenScreen> {
       if (_index >= widget.article.sentences.length) {
         setState(() => _playing = false);
         _publish();
+        // A completed pass, not a completed sentence. One `onFinished` per
+        // play-through: the caller decides whether that is a listen to count,
+        // and an interruption (pause, jump, dispose) never reaches here.
+        widget.onFinished?.call();
         return;
       }
       setState(() => _playing = true);
@@ -187,6 +243,7 @@ class _ListenScreenState extends State<ListenScreen> {
       } else {
         setState(() => _playing = false);
         _publish();
+        widget.onFinished?.call();
         return;
       }
     }
@@ -233,6 +290,18 @@ class _ListenScreenState extends State<ListenScreen> {
     unawaited(_playFrom(next, _generation));
   }
 
+  /// Start this article again from sentence one, and speak it.
+  ///
+  /// Distinct from `_jump` back to zero only in that it always speaks: a
+  /// reader who reaches for "from the beginning" wants to hear it, not to sit
+  /// on sentence 1 with the play button still meaning "resume here".
+  Future<void> _restart() async {
+    _generation++;
+    await widget.player.stop();
+    if (!mounted) return;
+    unawaited(_playFrom(0, _generation));
+  }
+
   void _resize(ListenSize next) {
     final ValueChanged<ListenSize>? cb = widget.onSize;
     if (cb != null) {
@@ -265,10 +334,10 @@ class _ListenScreenState extends State<ListenScreen> {
                 // No percentage and no "3 / 11". DESIGN: "no bar, no estimate,
                 // no progress. Those would make a reader feel behind."
                 Flexible(
-                  child: Text(
-                    widget.article.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  child: _TappableWords(
+                    text: widget.article.title,
+                    align: TextAlign.right,
+                    onWordTap: widget.onWordTap,
                     style: TextStyle(
                       fontFamily: TypeScale.mono,
                       fontSize: 10.5,
@@ -279,6 +348,21 @@ class _ListenScreenState extends State<ListenScreen> {
               ],
             ),
           ),
+          // The Chinese title, when the writer produced one. A title is the
+          // first thing a reader meets and often the hardest words in the
+          // piece; the translation answers that before the first sentence.
+          if (widget.article.titleCn.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Gap.gutter, 2, Gap.gutter, 0),
+              child: Text(
+                widget.article.titleCn,
+                style: TextStyle(
+                  fontFamily: TypeScale.serif,
+                  fontSize: 12,
+                  color: c.ink3,
+                ),
+              ),
+            ),
           Expanded(
             child: Center(
               child: SingleChildScrollView(
@@ -289,22 +373,24 @@ class _ListenScreenState extends State<ListenScreen> {
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: <Widget>[
                     // one sentence, large, centred — built for a glance from a
-                    // pocket rather than for reading at arm's length
-                    Text(
-                      _current.english,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontFamily: TypeScale.serif,
-                        fontSize: _size.px,
-                        height: 1.4,
-                        letterSpacing: -0.02,
-                        color: c.ink,
-                      ),
+                    // pocket rather than for reading at arm's length.
+                    // Words are tappable, with the same lookup as Read.
+                    _TappableWords(
+                      text: _current.english,
+                      align: TextAlign.center,
+                      onWordTap: widget.onWordTap,
+                      style: context.readingFace
+                          .style(c.ink, _size.px, height: 1.4)
+                          .copyWith(letterSpacing: -0.02),
                     ),
                     const SizedBox(height: 20),
                     // The translation is available but not shown by default, so
                     // listening is not the same as reading with the answer up.
-                    _ChineseReveal(text: _current.chinese, color: c),
+                    _ChineseReveal(
+                      text: _current.chinese,
+                      color: c,
+                      key: ValueKey<String>('${widget.article.id}/$_index'),
+                    ),
                   ],
                 ),
               ),
@@ -372,6 +458,31 @@ class _ListenScreenState extends State<ListenScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 12),
+            // Article-level transport. Sentences above, the piece as a whole
+            // here: "again from the start" and "the next article" are the two
+            // things a commuter asks for once a piece ends, and neither is a
+            // sentence jump.
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                _Round(
+                  icon: Icons.replay,
+                  tip: 'From the beginning',
+                  size: 42,
+                  onTap: _restart,
+                ),
+                if (widget.onNextArticle != null) ...<Widget>[
+                  const SizedBox(width: 14),
+                  _Round(
+                    icon: Icons.playlist_play,
+                    tip: 'Next article',
+                    size: 42,
+                    onTap: widget.onNextArticle!,
+                  ),
+                ],
+              ],
+            ),
             const SizedBox(height: 14),
             // A row of ticks, not a progress bar: it shows where you are without
             // implying you are behind. It is not tappable — it is a position,
@@ -432,8 +543,64 @@ class _ListenScreenState extends State<ListenScreen> {
   }
 }
 
+/// Words the reader can tap for meaning.
+///
+/// The Listen screen shows one sentence at a time, so a `Wrap` of word runs is
+/// enough: there is no multi-line hit-test to get wrong, and each word is its
+/// own target. Punctuation and spaces are not targets. Same lookup as the Read
+/// screen, one level deep, by wiring `onWordTap` to the same sheet.
+class _TappableWords extends StatelessWidget {
+  const _TappableWords({
+    required this.text,
+    required this.style,
+    required this.align,
+    this.onWordTap,
+  });
+
+  final String text;
+  final TextStyle style;
+  final TextAlign align;
+  final ValueChanged<String>? onWordTap;
+
+  static final RegExp _word = RegExp(r"[A-Za-z][A-Za-z'\-]*");
+
+  @override
+  Widget build(BuildContext context) {
+    final ValueChanged<String>? tap = onWordTap;
+    if (tap == null) {
+      return Text(text, textAlign: align, style: style);
+    }
+    final List<InlineSpan> spans = <InlineSpan>[];
+    int at = 0;
+    for (final Match m in _word.allMatches(text)) {
+      if (m.start > at) {
+        spans.add(TextSpan(text: text.substring(at, m.start)));
+      }
+      final String w = m.group(0)!;
+      spans.add(WidgetSpan(
+        baseline: TextBaseline.alphabetic,
+        style: style,
+        child: GestureDetector(
+          onTap: () => tap(w),
+          child: Text(w, style: style),
+        ),
+      ));
+      at = m.end;
+    }
+    if (at < text.length) spans.add(TextSpan(text: text.substring(at)));
+    return RichText(
+      textAlign: align,
+      text: TextSpan(style: style, children: spans),
+    );
+  }
+}
+
 class _ChineseReveal extends StatefulWidget {
-  const _ChineseReveal({required this.text, required this.color});
+  const _ChineseReveal({
+    super.key,
+    required this.text,
+    required this.color,
+  });
 
   final String text;
   final Palette color;
@@ -472,20 +639,26 @@ class _ChineseRevealState extends State<_ChineseReveal> {
         Text(
           widget.text,
           textAlign: TextAlign.center,
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 15,
-            height: 1.7,
-            color: c.ink2,
-          ),
+          style: context.readingFace.style(c.ink2, 15, height: 1.7),
         ),
         const SizedBox(height: 6),
-        Text(
-          'hide',
-          style: TextStyle(
-            fontFamily: TypeScale.sans,
-            fontSize: 11,
-            color: c.ink3,
+        // The close has to be a real control. It used to be a bare `Text` with
+        // the word "hide" on it, which looked like a button and did nothing —
+        // the one way to stop seeing the translation was to leave the screen.
+        TextButton(
+          onPressed: () => setState(() => _open = false),
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            minimumSize: const Size(0, 30),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: Text(
+            'hide',
+            style: TextStyle(
+              fontFamily: TypeScale.sans,
+              fontSize: 11,
+              color: c.ink3,
+            ),
           ),
         ),
       ],

@@ -34,8 +34,11 @@ local to them (which pane is open, whether a sheet's star is on).
 | File | What it holds |
 |---|---|
 | `models.dart` | `Article`, `Sentence`, `Mark`, `MarkTier`, `WordEntry` |
-| `queue.dart` | `Queue`, `QueueSlot`, `SlotState` — the three-slot model |
-| `plan.dart` | `ReadingPlan` (seven fields), `PlanField`, `PlanRewrite` |
+| `queue.dart` | `Queue`, `QueueSlot`, `SlotState`, `CostKind` — the three-slot model |
+| `plan.dart` | `ReadingPlan` (seven fields), `PlanField`, `LengthBand`, `PlanRewrite` |
+| `instruction.dart` | `Instruction` — a sentence the reader saved for the writer |
+| `agent_budget.dart` | every hard limit on a writing run, as bare constants |
+| `difficulty.dart` | `Difficulty`, the two coverage lines, `markCapFor` |
 | `word_pool.dart` | `WordPool`, the decay curve, `selectionChance` |
 | `library.dart` | `shelf()`, `ShelfRow`, `Library.search`, `mostRevisited` |
 
@@ -52,20 +55,126 @@ The five invariants live in these types, not in comments:
 subprocess fails with `CreateFile` error 231), so a test suite that cannot run
 would be worse than none. Run it with `dart tool/check_invariants.dart`.
 
+### Difficulty is derived, not stored
+
+`Article.difficulty` is a **getter**, computed from the marks the writer chose
+and the running words in the body. There is no `difficulty` column and there
+will not be one: the body already states everything the label needs, and a
+stored copy could disagree with the text it describes. The same reasoning that
+forbids a `library` table forbids this one.
+
+The price is that a stub article read back from the database has no band — the
+same price it already pays for having no word count.
+
+### There is no `topic`, and there will not be one again
+
+An article's subject is either **a sentence the reader typed** (`Instruction`,
+saved and reusable) or **the writer's own choice**. There is no field holding a
+list of permitted subjects, because such a list is configuration pretending to
+be content: it has to be maintained forever, and every article written under it
+drifts towards the same handful of words.
+
+What the reader sees instead is `Article.keywords` — three to six words the
+writer produced, shown on the card and in the article header. Keywords are
+*output*, so they cost nobody any maintenance and they say more than one label
+chosen in advance.
+
+`Instruction` is a sentence, not a noun. "Explain how a limit order fills, for
+someone who has never traded" is a request; `Finance` is not.
+
+### The writer decides how many words to mark
+
+`ReadingPlan` has no `marked` field. Asking a model for a fixed number of
+marked words makes it pad the list with words that did not need marking, and a
+mark that is wrong is worse than no mark. So the writer marks what it judges
+hard, and the app measures the density afterwards.
+
+`markCapFor` is the only ceiling, and it is not a setting: 1 mark per 4 words,
+five times the density at which an article already reads as Hard. Nothing a
+model plausibly returns comes near it, so the label is always honest.
+
 ## data/
 
 | File | Responsibility |
 |---|---|
-| `database.dart` | drift schema; `day_article` is the single source of truth for history |
+| `database.dart` | drift schema (**v3**); `day_article` is the single source of truth for history |
 | `repository.dart` | every read and write the app performs, in one place |
-| `keystore.dart` | the two API keys, in the Android Keystore and nowhere else |
+| `keystore.dart` | the four API keys, in the Android Keystore and nowhere else |
 | `dictionary.dart` | loads the inflated ECDICT json, in a background isolate |
 | `zip.dart` | a minimal single-member zip reader, so `archive` is not a dependency |
 | `audio.dart` | `SentencePlayer`: device TTS, MiMo recordings, and the cache |
 | `handler.dart` | the `audio_service` handler that puts transport on the lock screen |
 | `remote/api.dart` | the two HTTP shapes: writing, and speech |
+| `remote/agent.dart` | the writing loop: turns, tools, budget, retries, finalize |
+| `remote/chat.dart` | one OpenAI-compatible turn, parsed totally |
+| `remote/tools.dart` | `AgentTool`, `ReadStoryTool`, `WebSearchTool`, `ToolOutcome` |
+| `remote/news.dart` | the optional Zhihu Daily source |
+| `remote/mcp.dart` | a minimal MCP-over-HTTP client, for web search |
+| `remote/log.dart` | the in-memory ring buffer the debug screen reads |
 | `writer.dart` | builds the prompt and parses the writer's reply |
 | `samples.dart` | the bundled first-run articles |
+
+### `remote/` is pure Dart, and that is load-bearing
+
+Nothing under `data/remote/` may import `package:flutter`. `tool/check_agent.dart`
+drives the whole agent layer from a plain Dart program, and one
+`package:flutter/foundation.dart` anywhere in the chain pulls in `dart:ui`,
+which does not exist outside a Flutter engine. That is why `log.dart` uses plain
+callbacks instead of `ValueNotifier` and `print` instead of `debugPrint`.
+
+### The writing agent
+
+The writer is a single request by default and a small agent when — and only
+when — at least one optional source is configured. That decision is what keeps
+the cost line honest: a reader with no news key and no search key never enters
+the loop, so `one call · ~25 s` remains true for them.
+
+The loop is bounded by constants in `domain/agent_budget.dart`, every one of
+them checked *before* the blocking operation rather than after. Termination is
+structural: three monotonic counters (model calls, tool calls, turns) plus a
+wall clock, each checked at the top of every iteration, and no branch re-enters
+the loop without consuming one of them.
+
+Two Dart facts shape the code more than anything else:
+
+- **`Future.timeout` is not cancellation.** It completes the future; the socket
+  stays open and the response can arrive later, into a turn that is already
+  closed. So the loop owns its own `http.Client` and `close()`s it on timeout,
+  rebuilding lazily. It must never close `main._api`, which audio and plan
+  rewriting also use.
+- **`reasoning_content` must be stripped before an assistant turn is sent back.**
+  MiMo and DeepSeek reject their own reasoning being echoed. The strip happens
+  in exactly one function, `ChatTurn.assistantMessage()`.
+
+### Schema migrations, and the trap in them
+
+`schemaVersion` is **3**. The v1 → v2 upgrade rebuilds `plan_rows` (one `length`
+became three bands) and `queue_rows` (`planned_marked` became `planned_band`).
+The v2 → v3 upgrade drops `topic`/`focus` from `queue_rows`, drops `topics` from
+`plan_rows`, adds `keywords` and `last_seen_day` to `ledger_rows`, and creates
+`instruction_rows` and `article_rows`. All of it uses drift's `TableMigration`
+rather than drop-and-create, so a reader who had a plan keeps it.
+
+The v2 → v3 upgrade also CONVERTS data: every old topic becomes an instruction
+(`"NVDA"` → `"Write about NVDA"`), except the placeholder `Free pick`, which is
+deliberately dropped — a saved instruction saying "write about free picks" is
+worse than no instruction. The old topics are read with raw SQL *before* the
+rebuild, because the column is gone by the time the rebuild finishes.
+
+`article_rows` is new, and it fixes a real defect rather than only enabling one:
+before it, an article body lived in memory for the session, so a card came back
+after a restart reading `0 words` and opened onto nothing.
+
+**Rebuilding a table drops its triggers.** `queue_at_most_three` is invariant 1
+stated by the database, and `TableMigration` on `queue_rows` creates a new
+table, copies the rows, drops the old one and renames — taking the trigger with
+it. `_installQueueTrigger` is therefore called from **both** `onCreate` and the
+end of `onUpgrade`. One function, because two copies drift apart and only one of
+them is exercised on a fresh install. After any migration, verify with:
+
+```
+SELECT name FROM sqlite_master WHERE type='trigger';   -- queue_at_most_three
+```
 
 ### The dictionary
 
@@ -111,3 +220,33 @@ Two rules that are easy to break by accident:
 - Colours are never `#000` or `#fff`; the neutrals are warm.
 - Vermilion means "this costs money or is a primary action". Jade means "already
   done". A cost line that says `free` is jade — never vermilion.
+
+### Appearance, and why the reading faces are system families
+
+`AppearanceMode` is `light | dark | system`, and `system` is the default: a
+phone that has already been told what its owner prefers should not be asked
+again. `system` needs `WidgetsBindingObserver` — **not**
+`MediaQuery.platformBrightnessOf`, because `MarginaliaApp` sits above
+`MaterialApp` and has no `MediaQuery` to read.
+
+The status-bar icons invert with the surface. They were hard-coded light, which
+is right for `warm ink` and invisible on `warm paper`.
+
+`ReadingFace` offers six faces and five of them are **Android system families**.
+That is not laziness. Every article here is bilingual, so a face is only good if
+the Chinese beside it looks right — and that is decided by what Android
+substitutes for glyphs the Latin font lacks. `fonts.xml` answers per family
+(`fallbackFor="serif"`), so:
+
+- `serif` → Noto Serif **+ Noto Serif CJK** — a matched pair
+- `sans-serif` → Roboto **+ Noto Sans CJK** — a matched pair
+- `source-sans-pro` → Adobe's face; Noto Sans CJK is its sibling
+
+A bundled Latin font has no CJK at all, so its Chinese falls back to the
+phone's **sans** — serif English over sans Chinese, which is what the app
+shipped with and the reason `Noto Serif` is the default. `source-sans-pro` is
+not in the AOSP baseline, so it carries `sans-serif` as a fallback list rather
+than silently doing nothing on a phone without it.
+
+If you add a face, it must be one the phone already has, or it must ship with
+the APK.

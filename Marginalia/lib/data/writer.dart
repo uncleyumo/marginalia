@@ -13,9 +13,12 @@
 
 import 'dart:convert';
 
+import '../domain/difficulty.dart';
 import '../domain/models.dart';
 import '../domain/plan.dart';
+import 'remote/agent.dart';
 import 'remote/api.dart';
+import 'remote/news.dart';
 
 /// Builds the prompt and parses the answer. No Flutter, no storage: this is a
 /// pure function of (plan, topic, focus) and one HTTP response.
@@ -42,77 +45,214 @@ Rules, all of which matter:
   it is about to be explained.
 - Respect every "avoid" instruction absolutely. Holding something back is the
   whole point of those instructions.
+- Mark the words a reader at this level would genuinely not know. There is NO
+  target number of marks and no minimum. Marking a word that did not need it
+  makes the text harder to read and the list less useful, so when in doubt mark
+  fewer rather than more. Three well-chosen words beat ten padded ones, and an
+  article with no marks at all is a perfectly good answer.
+- "keywords" is an array of three to six short English words saying what the
+  article is about. Concrete nouns, lowercase, one to three words each. They go
+  on the card so the reader can see at a glance what this one is. Do not repeat
+  the title, and do not use them as a summary sentence.
+- You choose the subject unless you are told the reader asked for something
+  specific. When you choose, choose something surprising: this reader gets
+  three of these a day, and the fourth article about the same idea in different
+  words is worse than a strange one.
+''';
+
+  /// Added when tools are available. Kept apart from [system] so the fast path
+  /// sends exactly the prompt it has always sent.
+  static const String toolRules = '''
+You may look things up before you write. Two things to be honest about when you
+do:
+
+- If you read a story, it is written in CHINESE and you are writing ENGLISH.
+  Read it, understand it, then write your own article about the idea. Do NOT
+  translate it, do NOT follow its sentences, and do NOT reproduce any phrase
+  from it. The reader is paying for something new, not for a translation.
+- If a search tells you something you did not know, use it. If it contradicts
+  what you were about to write, believe the search.
+- If a tool fails, do not ask it again. Write the article from what you already
+  have. An article written without research is worth far more to the reader than
+  a third attempt at the same failing call.
 ''';
 
   /// The user's half: the plan, verbatim, plus the shape demanded.
+  ///
+  /// There is no `marked` argument and there will not be one again. How many
+  /// words get marked is the writer's judgement; the app measures the result.
+  /// See `difficulty.dart` for why asking for a number made the list worse.
+  ///
+  /// There is no `topic` argument either. The subject is either a sentence the
+  /// reader typed ([instruction]) or the writer's own choice — and in the
+  /// second case this method says so out loud, because a model told nothing
+  /// about a subject tends to reach for the safest, most obvious one.
+  ///
+  /// [agent] is null for the fast path: no tools configured, so the loop is not
+  /// started at all and this is exactly the single call it has always been. That
+  /// is the default reader — no news key, no search key — and it is why the cost
+  /// line can still say "one call" without lying.
   Future<Article> write({
     required String articleId,
-    required String topic,
-    required String focus,
     required ReadingPlan plan,
     required int words,
-    required int marked,
     required String apiKey,
     required WriterEndpoint endpoint,
+    String instruction = '',
+    List<NewsItem> news = const <NewsItem>[],
+    List<String> recentTitles = const <String>[],
+    List<String> metWords = const <String>[],
+    AgentLoop? agent,
+    void Function(AgentResult)? onResult,
   }) async {
     final String user = _userPrompt(
-      topic: topic,
-      focus: focus,
       plan: plan,
       words: words,
-      marked: marked,
+      instruction: instruction,
+      news: news,
+      recentTitles: recentTitles,
+      metWords: metWords,
     );
 
-    final String raw = await _api.write(
-      endpoint: endpoint,
-      apiKey: apiKey,
-      system: system,
-      user: user,
-    );
+    final String raw;
+    // What this run is FOR, in the reader's words, with the subject in it.
+    // The log stamps this on every line, so "which article is this about?"
+    // is answered on the card rather than by decoding a run id. Truncated
+    // because a log label is a label, not a prompt.
+    final String subject = instruction.trim();
+    final String what = subject.isEmpty
+        ? 'Writing an article (subject left to the writer)'
+        : 'Writing an article: ${_oneLine(subject)}';
+    if (agent == null) {
+      raw = await _api.write(
+        endpoint: endpoint,
+        apiKey: apiKey,
+        system: system,
+        user: user,
+        what: what,
+      );
+    } else {
+      final AgentResult r = await agent.run(system: system, user: user, what: what);
+      onResult?.call(r);
+      raw = r.content;
+    }
 
-    return parse(raw,
-        articleId: articleId, topic: topic, focus: focus, marked: marked);
+    return parse(raw, articleId: articleId);
   }
 
+  /// One quiet line, short enough to be a label.
+  static String _oneLine(String s) {
+    final String t = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return t.length <= 60 ? t : '${t.substring(0, 60)}…';
+  }
+
+  /// Build the user message.
+  ///
+  /// The shape of this is the whole argument against `topic`: what to write
+  /// about is either ONE SENTENCE THE READER TYPED or nothing at all, and
+  /// everything else here is about how it should read.
   String _userPrompt({
-    required String topic,
-    required String focus,
     required ReadingPlan plan,
     required int words,
-    required int marked,
+    required String instruction,
+    required List<NewsItem> news,
+    required List<String> recentTitles,
+    required List<String> metWords,
   }) {
     final StringBuffer b = StringBuffer();
-    b.writeln('Topic: $topic');
-    if (focus.trim().isNotEmpty) b.writeln('Lens: $focus');
-    b.writeln('About $words words, with at most $marked words marked.');
+
+    // Today, so the writer has something to vary on. Free, offline, and the
+    // cheapest possible source of "this one is different from the last one".
+    b.writeln('Today is ${_todayLine()}.');
     b.writeln();
-    b.writeln('The reading plan, field by field:');
-    if (plan.reader.trim().isNotEmpty) {
-      b.writeln('- The reader is: ${plan.reader}');
+
+    if (instruction.trim().isNotEmpty) {
+      b.writeln('The reader asked for this specifically:');
+      b.writeln('«${instruction.trim()}»');
+      b.writeln('Write that. Everything below governs HOW it should read, not '
+          'what it is about.');
+    } else {
+      b.writeln('NOTHING has been chosen for you. Pick the subject yourself, '
+          'and make it something this reader would not have guessed.');
     }
-    if (plan.topics.isNotEmpty) {
-      b.writeln('- Articles may come from: ${plan.topics.join(', ')}');
-    }
-    if (plan.style.isNotEmpty) {
-      b.writeln('- How it should read: ${plan.style.join('; ')}');
-    }
-    if (plan.gloss.isNotEmpty) {
-      b.writeln('- Explain these plainly: ${plan.gloss.join('; ')}');
-    }
-    if (plan.avoid.isNotEmpty) {
-      b.writeln('- Hold all of this back: ${plan.avoid.join('; ')}');
-    }
-    // Verbatim, and last, so nothing typed is edited away by a field above it.
-    if (plan.raw.trim().isNotEmpty) {
+    b.writeln();
+
+    if (recentTitles.isNotEmpty) {
+      b.writeln('You have written these recently — do not repeat them, and do '
+          'not write another article on the same subject in different words:');
+      for (final String t in recentTitles) {
+        b.writeln('- $t');
+      }
       b.writeln();
-      b.writeln('In the reader\'s own words, verbatim:');
-      b.writeln(plan.raw.trim());
     }
+
+    // The 30 headlines, when the news source is on. They go in the MESSAGE
+    // rather than behind a tool: they are already here, they are free, and
+    // making the model spend a paid round trip to read a list it could have
+    // been handed is waste.
+    if (news.isNotEmpty) {
+      b.writeln('Today\'s Zhihu Daily headlines. One of these is a good place '
+          'to start — read one with read_story if it looks promising, or '
+          'ignore them all and write about something else:');
+      for (final NewsItem n in news) {
+        b.writeln('${n.index}. ${n.title}');
+      }
+      b.writeln();
+    }
+
+    // The plan, through the plan's OWN renderer.
+    //
+    // This used to be a second, hand-written list of the same five fields, and
+    // the two had already drifted: the copy here said "Articles may come from"
+    // where the plan said "Topics may come from". Two renderings of one object
+    // is the second copy of the truth this project refuses to keep.
+    b.write(plan.toPrompt());
+    b.writeln();
+
+    if (metWords.isNotEmpty) {
+      b.writeln('This reader recently met these words: ${metWords.join(', ')}.');
+      b.writeln('Use four to six of them naturally, in real sentences — not '
+          'listed, not defined, just used.');
+      b.writeln();
+    }
+
+    b.writeln('About $words words.');
     b.writeln();
     b.writeln('Answer with this exact shape:');
-    b.writeln('{"title":"...","sentences":[{"en":"...","cn":"..."}],'
+    b.writeln('{"title":"...","titleCn":"...",'
+        '"keywords":["...","..."],'
+        '"sentences":[{"en":"...","cn":"..."}],'
         '"marks":[{"surface":"...","lemma":"...","tier":"unfamiliar"}]}');
+    b.writeln('`titleCn` is the same title in Chinese, short and natural — '
+        'the reader looks at the title first and may not know the words in it.');
     return b.toString();
+  }
+
+  static const List<String> _weekdays = <String>[
+    'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+  ];
+
+  static const List<String> _months = <String>[
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+
+  /// `Tuesday, 7 October 2026 — autumn`, in the northern hemisphere's seasons.
+  ///
+  /// The season is stated rather than computed from the hemisphere, because the
+  /// app does not know where the reader is and inventing one would be worse
+  /// than saying nothing. It is a nudge towards variety, not a fact the article
+  /// has to be about.
+  static String _todayLine([DateTime? now]) {
+    final DateTime n = now ?? DateTime.now();
+    final String season = switch (n.month) {
+      3 || 4 || 5 => 'spring',
+      6 || 7 || 8 => 'summer',
+      9 || 10 || 11 => 'autumn',
+      _ => 'winter',
+    };
+    return '${_weekdays[n.weekday - 1]}, ${n.day} ${_months[n.month - 1]} '
+        '${n.year} — $season';
   }
 
   /// Parse the answer. Throws [RemoteFailure] rather than returning a half-built
@@ -121,9 +261,6 @@ Rules, all of which matter:
   Article parse(
     String raw, {
     required String articleId,
-    required String topic,
-    required String focus,
-    required int marked,
   }) {
     final Object? decoded = _decode(raw);
     if (decoded is! Map) {
@@ -155,13 +292,23 @@ Rules, all of which matter:
           'The writer answered with no sentences. Nothing was saved.');
     }
 
+    // Counted BEFORE the marks, because the cap is derived from it. See below.
+    final int wordCount = _count(sentences);
+
+    // The cap is a guard against a pathological answer, not a setting and not a
+    // target: `markCapFor` allows 1 mark per 4 words, five times the density at
+    // which an article already reads as Hard. Nothing the writer would
+    // plausibly return comes near it, so the difficulty the reader sees is
+    // always the difficulty the writer actually wrote.
+    final int cap = markCapFor(wordCount);
+
     final List<Mark> marks = <Mark>[];
     final Set<String> seen = <String>{};
     final Object? rawMarks = decoded['marks'];
     if (rawMarks is List) {
       for (final Object? m in rawMarks) {
         if (m is! Map) continue;
-        if (marks.length >= marked) break;
+        if (marks.length >= cap) break;
         final Object? surface = m['surface'];
         final Object? lemma = m['lemma'];
         if (surface is! String || lemma is! String) continue;
@@ -181,18 +328,222 @@ Rules, all of which matter:
       }
     }
 
+    // Keywords are a DISPLAY aid, so nothing here may fail because of them. A
+    // model that returned a string instead of a list, or one long sentence
+    // instead of three words, still produced a good article — and throwing it
+    // away over a caption would be trading something paid for against
+    // something cosmetic.
+    final List<String> keywords = _keywords(decoded['keywords']);
+
+    // The Chinese title is an aid, not a requirement: a model that skipped it
+    // still produced a title the reader can tap for word meanings. Empty is
+    // the honest answer rather than a placeholder that pretends to be one.
+    final Object? titleCn = decoded['titleCn'] ?? decoded['title_cn'];
+
     // Counted here, not read from the json. See the file header.
-    final int wordCount = _count(sentences);
     return Article(
       id: articleId,
       title: title.trim(),
-      topic: topic,
-      focus: focus,
+      titleCn: titleCn is String ? titleCn.trim() : '',
+      keywords: keywords,
       sentences: sentences,
       marks: marks,
       wordCount: wordCount,
       minuteEstimate: (wordCount / 200).ceil().clamp(1, 60),
     );
+  }
+
+  /// At most six keywords, each at most three words, no duplicates.
+  ///
+  /// The cap is on the CARD, not on the model: six short words is what fits on
+  /// one quiet line, and a card that has to wrap its keywords has stopped being
+  /// a glance.
+  static List<String> _keywords(Object? raw) {
+    if (raw is! List) return const <String>[];
+    final List<String> out = <String>[];
+    final Set<String> seen = <String>{};
+    for (final Object? k in raw) {
+      if (k is! String) continue;
+      final String w = k.trim().replaceAll(RegExp(r'\s+'), ' ');
+      if (w.isEmpty || w.length > 40) continue;
+      if (w.split(' ').length > 3) continue;
+      if (!seen.add(w.toLowerCase())) continue;
+      out.add(w);
+      if (out.length >= 6) break;
+    }
+    return out;
+  }
+
+  // ── the plan, rewritten by the same model ───────────────────────────────
+
+  /// What the model is told when it is editing the PLAN rather than writing.
+  ///
+  /// The field-by-field types are spelled out because the answer is parsed back
+  /// into `ReadingPlan` and a field of the wrong type has to be dropped rather
+  /// than crash the sheet. Everything here is a constraint on SHAPE; what the
+  /// plan should say is the reader's request, not this prompt's business.
+  static const String planSystem = '''
+You edit a reading plan for an app that writes short English articles for one
+reader who is learning English. You do not write articles.
+
+Output ONE json object and nothing else. No prose before or after it. The
+object has exactly these keys:
+- "reader": string. Who the reader is and what they already know. This is the
+  vocabulary ceiling — it is what stops the writer explaining pointers to
+  someone who writes code.
+- "topics": array of strings. Where articles may come from.
+- "style": array of strings. How the writing should read.
+- "gloss": array of strings. Words or ideas to explain in plain language.
+- "avoid": array of strings. What to hold back. This is the field that stops a
+  fluent but wrong draft, so never empty it without being asked to.
+- "shortWords": integer, 50 to 2000. What "short" means, in words.
+- "mediumWords": integer, 50 to 2000. What "medium" means.
+- "longWords": integer, 50 to 2000. What "long" means.
+
+Rules:
+- Change only what the request asks for. Every other field must come back
+  exactly as it was given, byte for byte.
+- Add to the existing arrays; do not replace them, unless the request is
+  explicitly to remove something.
+- Keep shortWords <= mediumWords <= longWords.
+- Write the field VALUES in the reader's own language where they already are.
+  Do not translate what is already there.
+''';
+
+  /// Ask the model for a new plan, held aside as a diff.
+  ///
+  /// Returns a [PlanRewrite], never a bare plan: "your plan changed" is a claim
+  /// the reader has to be able to SEE, so the proposal travels with the list of
+  /// fields that differ and nothing is written until they accept it.
+  Future<PlanRewrite> rewritePlan({
+    required ReadingPlan plan,
+    required String request,
+    required String apiKey,
+    required WriterEndpoint endpoint,
+  }) async {
+    final StringBuffer b = StringBuffer();
+    b.writeln('The plan as it stands:');
+    b.writeln(jsonEncode(<String, Object?>{
+      'reader': plan.reader,
+      'style': plan.style,
+      'gloss': plan.gloss,
+      'avoid': plan.avoid,
+      'shortWords': plan.shortWords,
+      'mediumWords': plan.mediumWords,
+      'longWords': plan.longWords,
+    }));
+    if (plan.raw.trim().isNotEmpty) {
+      b.writeln();
+      b.writeln('The reader also wrote, in their own words, verbatim:');
+      b.writeln(plan.raw.trim());
+    }
+    b.writeln();
+    b.writeln('The change they asked for:');
+    b.writeln(request.trim());
+
+    final String raw = await _api.write(
+      endpoint: endpoint,
+      apiKey: apiKey,
+      system: planSystem,
+      user: b.toString(),
+      // The plan is a "which configuration" question, not an article. Saying
+      // so on the log card is the difference between "something failed" and
+      // "the plan rewrite failed".
+      what: 'Rewriting your reading plan: ${_oneLine(request)}',
+    );
+
+    final ReadingPlan proposal = _planFrom(raw, plan);
+    return PlanRewrite(proposal: proposal, changes: _diff(plan, proposal));
+  }
+
+  /// Read a plan out of an answer, falling back to [old] field by field.
+  ///
+  /// NEVER throws on a bad field. A rewrite that got seven fields right and one
+  /// wrong should hand the reader seven changes, not an error — the whole
+  /// reason the diff exists is that they get to look before it lands, so a
+  /// partly-wrong answer costs them nothing but a glance.
+  ///
+  /// The one thing that IS an error: no usable json at all. There is nothing to
+  /// show and nothing to fall back to but the old plan, and silently returning
+  /// the old plan would make the sheet say "no changes" about a call that
+  /// failed. That is the same lie as a card that shows a title with no body.
+  ReadingPlan _planFrom(String raw, ReadingPlan old) {
+    final Object? decoded = _decode(raw);
+    if (decoded is! Map) {
+      throw const RemoteFailure(
+          'The writer answered in a shape this app cannot read. Your plan was '
+          'not touched.');
+    }
+
+    /// Strings only, trimmed, empties dropped. A number or a nested object in a
+    /// list field is a type error, not a value to coerce.
+    List<String> list(Object? v, List<String> fallback) {
+      if (v is! List) return fallback;
+      final List<String> out = <String>[
+        for (final Object? x in v)
+          if (x is String && x.trim().isNotEmpty) x.trim(),
+      ];
+      // An empty list where there was content is a deletion nobody asked for;
+      // `avoid` is the field that stops a fluent-but-wrong draft, and a rewrite
+      // that silently emptied it would be a rewrite that made the app worse.
+      return out.isEmpty && fallback.isNotEmpty ? fallback : out;
+    }
+
+    String text(Object? v, String fallback) =>
+        v is String && v.trim().isNotEmpty ? v.trim() : fallback;
+
+    /// A length is clamped into the range the sheet's stepper offers, so a
+    /// model that answers `"mediumWords": 30000` cannot produce a card that
+    /// asks for thirty thousand words.
+    int number(Object? v, int fallback) =>
+        v is int ? v.clamp(50, 2000) : fallback;
+
+    final int short = number(decoded['shortWords'], old.shortWords);
+    final int medium = number(decoded['mediumWords'], old.mediumWords);
+    final int long = number(decoded['longWords'], old.longWords);
+
+    // Ordered, because a plan where "long" is shorter than "short" is a plan
+    // whose three bands mean nothing. Sorting is the only repair that keeps all
+    // three numbers the model chose.
+    final List<int> ordered = <int>[short, medium, long]..sort();
+
+    return ReadingPlan(
+      reader: text(decoded['reader'], old.reader),
+      style: list(decoded['style'], old.style),
+      gloss: list(decoded['gloss'], old.gloss),
+      avoid: list(decoded['avoid'], old.avoid),
+      shortWords: ordered[0],
+      mediumWords: ordered[1],
+      longWords: ordered[2],
+      // Carried through untouched. Ask-the-AI edits fields; it does not eat the
+      // reader's own words.
+      raw: old.raw,
+    );
+  }
+
+  /// Which fields actually differ, for the diff the sheet renders.
+  ///
+  /// Compared as rendered text, so a change of whitespace or of list order is
+  /// not reported as a change — a diff that lists fields nothing happened to
+  /// teaches the reader to stop reading it.
+  List<PlanChange> _diff(ReadingPlan before, ReadingPlan after) {
+    final List<PlanChange> out = <PlanChange>[];
+
+    void one(PlanField field, String was, String now) {
+      if (was.trim() == now.trim()) return;
+      out.add(PlanChange(field: field, was: was, now: now));
+    }
+
+    one(PlanField.reader, before.reader, after.reader);
+    one(PlanField.style, before.style.join(', '), after.style.join(', '));
+    one(PlanField.gloss, before.gloss.join(', '), after.gloss.join(', '));
+    one(PlanField.avoid, before.avoid.join(', '), after.avoid.join(', '));
+    one(PlanField.lengthShort, '${before.shortWords}',
+        '${after.shortWords}');
+    one(PlanField.lengthMedium, '${before.mediumWords}',
+        '${after.mediumWords}');
+    one(PlanField.lengthLong, '${before.longWords}', '${after.longWords}');
+    return out;
   }
 
   /// Tolerate a fenced block and a stray sentence around it. Models wrap json in

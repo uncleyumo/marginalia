@@ -271,3 +271,37 @@ flutter analyze
 # 离线词典解码器对着真包跑一遍
 dart tool/check_dictionary.dart
 ```
+
+
+---
+
+## 模拟器测试结果（2026-10-11 · d511f85 + a8aa32f）
+
+证据：`docs/verify/d511f85/`（41 张截图）。驱动方式：adb tap/swipe + screencap。
+
+| 组 | 结果 | 备注 |
+|---|---|---|
+| 1 冷启动与基线 | **通过** | `boot: done`；卡片有间距；SAMPLE 标签；脚注非卡片 |
+| 2 取词翻译 | **通过** | 折行第 2/3 行命中正确；标题可点词；二级纯中文释义可关闭无递归；Translation 可收起 |
+| 3 样例覆盖 | **通过** | 自定义指示生成 `What a Hash Map Really Is`，重启后仍在；样例不再顶掉正文 |
+| 4 重新生成与统计 | **通过** | Write a new one 先出选题面板；Done with it toast 明示 not counted as a read；日历今日无 read |
+| 5 Listen 页 | **通过** | 默认不自动播；点词/翻译 hide/从头/Read↔Listen 保位；听完全文 listens +1 |
+| 6 Listening 设置 | **通过** | 三段齐全；Play at once 会自动播；改回 Wait 后不播 |
+| 7 随机音色 | **通过** | Random 在首位；选中后 hub 显示 `MiMo · Random`；Mia 恒定 |
+| 8 Debug log | **通过** | 按 run 分组卡片；人话标题+时间；失败红框含 could not reach the provider；hub 写 N things asked for |
+| 9 收尾 | **通过** | analyze 0 error；133+45 不变量全过；APK 73 MB；冷启动正常 |
+
+### 测试中发现并修复的 bug
+
+**样例槽位未 hydrate**（`a8aa32f`）：`_openArticle(q.slots[i])` 传的是数据库 stub
+（有 id 无正文），`sentences.isEmpty` 直接 return——卡片渲染用的是 `_hydrated` 副本
+所以画了 Read 按钮，点下去却什么都不做。菜单同样读 stub，把有正文的文章误报成
+"the text is gone"。修复：`_openArticle` 内部先 `_hydrated(slot)`，`_slotMenu` 同理。
+
+### 未逐条走完的项
+
+- 5.6 Next article：当时队列只剩一篇 ready（A Phone 已被 Done with it 归档），
+  按钮按设计隐藏。逻辑由 `_peekNextListen` 保证，check_invariants 覆盖。
+- 7.3 两篇音色是否不同：需听感对比，截图无法取证；`_resolveVoice` 每次 stop 重摇。
+- 8.5 Copy all 剪贴板内容：adb 读不到 Android 剪贴板；`AgentLog.dump()` 的分段
+  格式由 check_agent 覆盖。

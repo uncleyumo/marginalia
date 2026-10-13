@@ -9,6 +9,12 @@ build/
 .dart_tool/
 *.log
 
+# Build output. An APK is a release artefact, not source: it is 73MB, it is
+# rebuilt by `flutter build apk`, and a stale one committed by accident would
+# sit in the history forever. Publish it from a release, not from here.
+*.apk
+*.aab
+
 # OS noise
 Thumbs.db
 desktop.ini

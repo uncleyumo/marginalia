@@ -30,6 +30,7 @@
 //    is text and nothing else.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 
 import '../../core/design/tokens.dart';
 import '../../core/widgets/back_label.dart';
@@ -598,7 +599,7 @@ class _SentenceView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final Palette c = context.colors;
-    final Widget line = _TappableSentence(
+    final Widget line = TappableSentence(
       text: sentence.english,
       marks: marks,
       onWordTap: onWordTap,
@@ -651,11 +652,15 @@ class _SentenceView extends StatelessWidget {
 /// box: a rectangle would hide the word it is annotating, and the sentence
 /// around it has to stay readable.
 ///
-/// Hit-testing goes through [TextPainter] rather than a per-span recogniser,
-/// because a recogniser per word loses the punctuation spacing — the tap area
-/// has to include the space after the word, or half of every tap misses.
-class _TappableSentence extends StatelessWidget {
-  const _TappableSentence({
+/// Hit-testing asks the [RenderParagraph] that drew the sentence, rather than a
+/// per-span recogniser or a painter rebuilt from the string. A recogniser per
+/// word loses the punctuation spacing — the tap area has to include the space
+/// after the word, or half of every tap misses. A rebuilt painter loses it a
+/// different way: it agrees with the screen about nothing, and the disagreement
+/// grows with the font size, which is the mis-hit this replaced.
+class TappableSentence extends StatelessWidget {
+  TappableSentence({
+    super.key,
     required this.text,
     required this.marks,
     required this.onWordTap,
@@ -672,6 +677,14 @@ class _TappableSentence extends StatelessWidget {
   final Color baseColor;
 
   static final RegExp _word = RegExp(r"[A-Za-z][A-Za-z'\-]*");
+
+  /// The RenderParagraph that drew this sentence.
+  ///
+  /// A key rather than a context captured in build, because [_resolve] runs
+  /// from a gesture and the gesture's context is the GestureDetector's, one
+  /// level above the text. The current context is read at tap time, which is
+  /// when it is valid.
+  final GlobalKey _bodyKey = GlobalKey();
 
   /// Offsets of every word, so a tap can be mapped back to one. Computed once
   /// per build rather than per tap.
@@ -732,111 +745,108 @@ class _TappableSentence extends StatelessWidget {
       ));
     }
 
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapUp: (TapUpDetails d) =>
-              _resolve(d.localPosition, constraints.maxWidth, face),
-          // Long press is how a LINE is heard. A tap is a question about a word;
-          // a press-and-hold is a question about the sentence around it, and the
-          // two never compete for the same gesture.
-          onLongPress: onLongPress,
-          child: Text.rich(
-            TextSpan(style: TextStyle(color: baseColor), children: spans),
-          ),
-        );
-      },
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapUp: (TapUpDetails d) => _resolve(d.globalPosition),
+      // Long press is how a LINE is heard. A tap is a question about a word;
+      // a press-and-hold is a question about the sentence around it, and the
+      // two never compete for the same gesture.
+      onLongPress: onLongPress,
+      child: Text.rich(
+        key: _bodyKey,
+        TextSpan(style: TextStyle(color: baseColor), children: spans),
+      ),
     );
   }
 
-  /// Which word was tapped, by asking a painter that measured the ORIGINAL
-  /// sentence where the tap landed in the text.
+  /// Which word was tapped, asked of the RenderParagraph that is ALREADY on
+  /// screen rather than of a painter rebuilt here.
+  ///
+  /// This is the fix for the long-standing mis-hit. The previous version built
+  /// a TextPainter from the same string and measured against that, and it
+  /// drifted from what the reader was looking at in four separate ways: it
+  /// omitted the underline decoration the marked words carry (which changes
+  /// line height), it passed no textScaler, it measured at the LayoutBuilder's
+  /// maxWidth instead of the width the text actually wrapped at, and it knew
+  /// nothing about the 10px of left padding a speaking sentence gains. Every
+  /// one of those is invisible on a small short sentence and obvious on a
+  /// large-font long one, which is why the bug read as "sometimes".
+  ///
+  /// The RenderParagraph has none of that problem: it IS the layout. Same
+  /// font, same scaler, same wrapping, same decorations, same padding, because
+  /// it is the object that drew the words the reader pointed at.
   ///
   /// A miss still reports the nearest word rather than nothing: the reader
-  /// pointed at the text, and answering with an empty card would read as the app
-  /// being broken.
-  void _resolve(Offset position, double width, ReadingFace face) {
+  /// pointed at the text, and answering with an empty card would read as the
+  /// app being broken.
+  void _resolve(Offset globalPosition) {
     final List<({int start, int end, String word})> tokens = _tokens();
     if (tokens.isEmpty) return;
 
-    // Measure the original sentence, not a rebuild of it. Each token carries
-    // offsets into `text` — punctuation included — so a painter built from
-    // joined words would answer with carets that drift by every comma the
-    // rebuild dropped, and the rebuilt string also does not wrap the way this
-    // widget lays text out. One span, one style, the real text: then a caret
-    // asked for at a token's offset is the caret the reader is looking at.
-    //
-    // "ONE STYLE" NOW INCLUDES THE FACE. The painter has to be built with the
-    // same family as the text it is measuring: a different face has different
-    // advance widths, so every word would be measured at a position it does not
-    // occupy and taps would land one or two words away from where the reader
-    // pointed. That is why the face is a parameter here rather than read off
-    // the context — this method runs from a gesture, and the gesture's context
-    // is not the widget's.
-    final TextPainter painter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: face.style(Colors.black, sizePx, height: 1.86),
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.start,
-    )..layout(maxWidth: width > 0 ? width : 400.0);
-
-    try {
-      // Ask where the tap landed in TEXT, then take the word under it. An x-only
-      // band test cannot tell line 2 from line 1 on a wrapped sentence: the same
-      // x exists on every line, so a tap on line 2 kept answering with whatever
-      // line 1 happened to put at that x.
-      final TextPosition caret = painter.getPositionForOffset(position);
-      final TextRange range = painter.getWordBoundary(caret);
-      if (range.isValid && !range.isCollapsed) {
-        for (final ({int start, int end, String word}) t in tokens) {
-          // Word boundaries and the tokenizer can split differently around
-          // apostrophes and hyphens; any overlap with a token is that token.
-          if (t.start < range.end && t.end > range.start) {
-            onWordTap(t.word);
-            return;
-          }
-        }
-      }
-
-      // Tap on whitespace or punctuation (or a boundary that matched no token).
-      // Nearest means nearest in BOTH axes, measured to the word's painted
-      // rects: a caret-rect test on x alone would still hand line 2's tap to a
-      // line-1 word sitting at the same x, and a wrapped word has its end caret
-      // to the LEFT of its start caret, which no start→end x band can contain.
-      ({int start, int end, String word}) best = tokens.first;
-      double bestDist = double.infinity;
-      for (final ({int start, int end, String word}) t in tokens) {
-        double wordDist = double.infinity;
-        final List<TextBox> boxes = painter.getBoxesForSelection(
-          TextSelection(baseOffset: t.start, extentOffset: t.end),
-        );
-        for (final TextBox box in boxes) {
-          final double dx = position.dx < box.left
-              ? box.left - position.dx
-              : position.dx > box.right
-                  ? position.dx - box.right
-                  : 0.0;
-          final double dy = position.dy < box.top
-              ? box.top - position.dy
-              : position.dy > box.bottom
-                  ? position.dy - box.bottom
-                  : 0.0;
-          // Squared distance: the comparison never needs the root.
-          final double d = dx * dx + dy * dy;
-          if (d < wordDist) wordDist = d;
-        }
-        if (wordDist < bestDist) {
-          bestDist = wordDist;
-          best = t;
-        }
-      }
-      onWordTap(best.word);
-    } finally {
-      painter.dispose();
+    final RenderObject? ro = _bodyKey.currentContext?.findRenderObject();
+    if (ro is! RenderParagraph) {
+      // Not laid out yet — a tap that arrives between builds. The old code
+      // would have answered from a painter, so answer from the first token
+      // rather than dropping the gesture on the floor.
+      onWordTap(tokens.first.word);
+      return;
     }
+
+    // The paragraph's own coordinate space. globalPosition comes from the
+    // gesture, so it has to come back to local before the render object can
+    // use it.
+    final Offset position = ro.globalToLocal(globalPosition);
+
+    // Ask where the tap landed in TEXT, then take the word under it. An x-only
+    // band test cannot tell line 2 from line 1 on a wrapped sentence: the same
+    // x exists on every line, so a tap on line 2 kept answering with whatever
+    // line 1 happened to put at that x.
+    final TextPosition caret = ro.getPositionForOffset(position);
+    final TextRange range = ro.getWordBoundary(caret);
+    if (range.isValid && !range.isCollapsed) {
+      for (final ({int start, int end, String word}) t in tokens) {
+        // Word boundaries and the tokenizer can split differently around
+        // apostrophes and hyphens; any overlap with a token is that token.
+        if (t.start < range.end && t.end > range.start) {
+          onWordTap(t.word);
+          return;
+        }
+      }
+    }
+
+    // Tap on whitespace or punctuation (or a boundary that matched no token).
+    // Nearest means nearest in BOTH axes, measured to the word's painted
+    // rects: a caret-rect test on x alone would still hand line 2's tap to a
+    // line-1 word sitting at the same x, and a wrapped word has its end caret
+    // to the LEFT of its start caret, which no start→end x band can contain.
+    ({int start, int end, String word}) best = tokens.first;
+    double bestDist = double.infinity;
+    for (final ({int start, int end, String word}) t in tokens) {
+      double wordDist = double.infinity;
+      final List<TextBox> boxes = ro.getBoxesForSelection(
+        TextSelection(baseOffset: t.start, extentOffset: t.end),
+      );
+      for (final TextBox box in boxes) {
+        final double dx = position.dx < box.left
+            ? box.left - position.dx
+            : position.dx > box.right
+                ? position.dx - box.right
+                : 0.0;
+        final double dy = position.dy < box.top
+            ? box.top - position.dy
+            : position.dy > box.bottom
+                ? position.dy - box.bottom
+                : 0.0;
+        // Squared distance: the comparison never needs the root.
+        final double d = dx * dx + dy * dy;
+        if (d < wordDist) wordDist = d;
+      }
+      if (wordDist < bestDist) {
+        bestDist = wordDist;
+        best = t;
+      }
+    }
+    onWordTap(best.word);
   }
 }
 

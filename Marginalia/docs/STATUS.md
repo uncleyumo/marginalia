@@ -1,6 +1,6 @@
 # 项目现状
 
-> 最后更新：2026-10-08
+> 最后更新：2026-10-13
 > 这份文档说的是**代码实际做到的事**。当它和 `FLUTTER_PLAN.md` 冲突时以它为准——
 > 那份规划写于动工之前，第 5 行至今还写着"尚未写任何业务代码"。
 
@@ -8,6 +8,31 @@
 
 五个界面（Queue / Article / Listen / Library / History / Words / Settings）全部实现，
 离线词典、设备 TTS、MiMo 语音、写作链路、锁屏播放都已接线。**没有 stub，没有 TODO。**
+
+## 本轮（2026-10-13）：照片当指令
+
+遇到好词好句会拍、好的场景会记、在别的软件背单词会截图——这些现在可以直接当指令用。
+
+计划卡上 `↻` 旁边多了一个 **`▣`**，点它打开选图面板：先说这些图是什么
+（`A good sentence` / `A scene` / `A word list`），再从相册选（最多 5 张）或现拍一张，
+最后 `Attach N · then Write it` 回到卡片，**再点一次 `Write it` 才花钱**。
+
+| 决定 | 为什么 |
+|---|---|
+| **附图免费，写入才花钱** | 附图是选择，选择不花钱——和 `↻`、`Change it` 同一条线 |
+| **压到 2 MB 以下再发** | 12 MP 照片约 4 MB，5 张 base64 后是 27 MB 请求体，好几家 provider 会在计费前直接拒。面板显示 `3.8 MB → 480 KB` 实数 |
+| **已经够小的原样发** | 把 200 KB 的截图重编码一遍，图变更差、字节没省 |
+| **缩到 1568 长边** | 视觉模型的通用约定，且是本机做的——provider 自己的缩放器对文字截图不友好 |
+| **`supportsVision` 是端点上的字段，不是猜的** | `deepseek-chat` 对 content 数组回 `400 unknown variant image_url`，根本没看那张图。所以**在调用前**就拒，拒绝文案点名能看的几家 |
+| **只进第一条 user 消息** | agent 循环会发好几次请求，每轮都重发 5 张图等于同样的字节付四次钱 |
+| **什么都不存** | 没有图片表、没有相册、写用完就消失——读者自己相册里已经有了。唯一写进队列行的是意图（`from a word list`），否则卡片会一边挂着 5 张图一边显示 `Anything` |
+| **意图必填** | 同一张照片，"写这句话的意思"/"描写这个场景"/"把这些词用进句子"是三篇不同的文章，猜错就是白花一次钱。一个 chip 比一篇错的文章便宜 |
+| **`system` 提示词不动，`pictureRules` 追加以图为准** | 给没收到图的模型描述照片，是让它在找一个不在那里的东西 |
+
+**没测的部分**：本机没有连接模拟器（`adb devices` 为空），所以选图面板的 UI 交互
+和实机压缩没有走完。已验的是：`flutter analyze` 0 error、149+45 条可执行规则全过、
+release APK 构建通过（77.1 MB）、`data/shrink.dart` 用真图跑过（2.7 MB → 1.3 MB，
+478 KB 原样透传）。
 
 ## 已在模拟器上实测通过（2026-10-07，x86_64 · Android 16）
 
@@ -233,6 +258,55 @@ Settings 从 5 行变 7 行，新增 `Instructions` 与 `Debug log`。
 | 文章正文不落库 | 已存在的行为，但有一个可见后果：**重启后，之前写的文章卡片会显示 `0 words · 0 min read`，点 Read 打开是空的**。正文只在内存里（`_written`），数据库只存身份与计数。要修需要新增一张正文表——那和「counts are not storage」的设计直接冲突，属于要你拍板的架构决定，没动 |
 | 评分 / 打卡 / 进度环 | 不做，DESIGN §1 明确禁止 |
 | **pubspec 里 6 个依赖声明了但零引用** | `flutter_riverpod` / `go_router` / `freezed_annotation` / `json_annotation` / `intl` / `collection`，以及 dev 的 `freezed` / `json_serializable`——全仓 `grep 'package:<名字>/'` 零命中。但 pubspec 的注释在为它们辩护（"Provider composition expresses 'computed from that'"、"Nested routes and route parameters carry that context"），而 `main.dart` 里**没有任何 Provider、没有任何路由表**，状态由 `_ShellState` 单点持有。**删依赖等于改架构**，所以留着没动，等你决定：要么删掉并改写注释，要么按注释把 Provider / go_router 真的用起来 |
+| **「总有一篇新的在等你」这条原则没有实现** | 见下面专门一节。**这是设计冲突，不是漏掉的代码** |
+
+## 「总有一篇新的在等你」——冲突在哪儿，以及我提的方案
+
+读者提出的原则是：**无论什么情况，至少有一篇新的在等你。** 当前代码做不到，因为
+三份文档在承诺三件不同的事：
+
+| 位置 | 承诺 |
+|---|---|
+| `lib/main.dart:1069`、`README.md:16`、`USER_GUIDE.md` | "Finish one and the next is written **at once**" / "读完一张，就补一张新的" |
+| `lib/domain/queue.dart:255` + DESIGN.md:194 | "Done with it replaces a card with a **plan**, not an article — so the next thing also **waits**" |
+| 代码实际行为 | 读完**什么都不发生**；换卡只有 `Done with it` 一条路，换成的是一张免费计划卡 |
+
+代码是自洽的：全仓没有 Timer / WorkManager / 后台任务，`_write` 的三个调用点全是点击触发，
+`mayAutoWrite` 守的是一条**不存在的代码路径**。所以"读完自动补一篇"从来就没实现过，
+而三处 UI 文案一直在承诺它。
+
+### 我提的方案（未实现，等你拍板）
+
+读着读者的枚举，真正想说的是「**总有一篇你还没碰过的在等**」。这比"自动写一篇"便宜得多，
+也不碰成本上限——它不需要花一分钱：
+
+> **队列里永远至少有一张 `planned` 卡。**
+>
+> 具体规则只有一条：当三张卡全是 `ready`、且没有一张 `planned` 时，把**读得最多/
+> 听得最多的那一张**收进 Library（`retireReadySlot`，计数完整保留、可重开），
+> 空出的位子放一张免费计划卡。
+>
+> 于是所有状态都收敛到读者枚举的那三种，而且不再有第四种：
+>
+> | 状态 | 怎么到达 | 怎么离开 |
+> |---|---|---|
+> | 1 planned + 2 ready | 常态 | 点 `Write it`（花钱） |
+> | 2 planned + 1 ready | 写完一篇，或 `Done with it` 掉一篇 | 点 `Write it` |
+> | 3 planned | 全部 `Done with it` | 点 `Write it` |
+>
+> 读者枚举的"情况 3"（1 已学 + 2 待生成）由此变成**瞬态**而非稳态——它只在一个动作
+> 与下一个动作之间存在，队列自己会收敛回 1 planned。
+>
+> 代价：**收窄了不变量 3**。"Reading counts and never removes" 变成 "reading counts and
+> never removes，除非三张都读完"——那时动的是读过最多的那张，而它本来就是读者最可能
+> 不想再当头一篇的。读者若不同意这个代价，替代方案见下。
+
+两个替代方案，都不实现原则：
+
+- **改文案**（`main.dart:1069`、`README.md:16`、`USER_GUIDE.md` 三处）改成实话，
+  加一个"三篇都读完了"的提示。零花费、零架构改动，代价是原则不实现。
+- **真的自动写**：三张都读过且无计划卡时自动写一篇。完全满足期待，但打破
+  「未经同意不花钱」的硬顶，需要重写成本上限说明、加设置开关、限定只能前台触发。
 
 ## 环境坑（会再咬人，记下来）
 

@@ -1,7 +1,8 @@
 # marginalia
 
 A no-stop English reader for Android. Three articles are always waiting; you read
-one, hear one, or both, and the next is written while you are away from the phone.
+one, hear one, or both, and what you have read stays where it is. Nothing is spent
+until you tap Write it.
 
 The name is the thing itself: marginalia are the notes a reader leaves in the
 margin. This app is a margin that answers back.

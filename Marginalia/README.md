@@ -1,7 +1,8 @@
 # marginalia
 
 A no-stop English reader. Three articles are always waiting; you read one, hear
-one, or both, and the next is written while you are away from the phone.
+one, or both, and what you have read stays where it is. Nothing is spent until
+you tap Write it.
 
 The name is the thing itself: marginalia are the notes a reader leaves in the
 margin. This app is a margin that answers back.
@@ -13,9 +14,10 @@ margin. This app is a margin that answers back.
   a line to hear it.
 - **Listen.** The second tab shows one sentence at a time, very large, and reads
   the whole article aloud with the transport on the lock screen.
-- **The queue is three, always.** Finish one and the next is written. Reading
-  counts and never removes anything — there is no "done" state anywhere in the
-  data model.
+- **The queue is three, always.** Reading counts and never removes anything —
+  there is no "done" state anywhere in the data model, and an article you have
+  read stays where it is so you can go back to it. A card leaves only when you
+  say so, and what takes its place is a free *plan*, not a paid article.
 - **The words come back.** Words you meet and words you star gain weight; weight
   decays with a seven-day half-life and steers what the next article is about.
 

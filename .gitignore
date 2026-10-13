@@ -9,6 +9,13 @@ build/
 .dart_tool/
 *.log
 
+# Local machine workflow. The Windows helpers here set JAVA_HOME, ANDROID_HOME
+# and PATH for one specific box, and the handover notes that went with them
+# were written for one reader. Useful to the author, noise to everyone else,
+# and a hard-coded SDK path in a public repo is a liability — so they stay out
+# of git and out of the release.
+scripts.local/
+
 # Build output. An APK is a release artefact, not source: it is 73MB, it is
 # rebuilt by `flutter build apk`, and a stale one committed by accident would
 # sit in the history forever. Publish it from a release, not from here.

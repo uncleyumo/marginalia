@@ -47,7 +47,7 @@ MSYS_NO_PATHCONV=1 "$ADB" install -r build/app/outputs/flutter-apk/app-release.a
 
 `avdmanager` 需要 JDK 8（在 11+ 上会因为 JAXB 被移除而 `NoClassDefFoundError`），
 Gradle 9 需要 JDK 17+。一个全局 `JAVA_HOME` 只能满足其中一个，所以钉在项目里，
-`avdmanager` 单独在命令行上给 `JAVA_HOME=8`（见 `run-emulator.bat`）。
+`avdmanager` 单独在命令行上给 `JAVA_HOME=8`。
 
 ### 代理：只要「依赖有变化」就必须加
 
@@ -123,7 +123,12 @@ flutter build apk --debug
 
 ### 起模拟器
 
-`run-emulator.bat`。屏幕是 **1080×1920**。
+屏幕是 **1080×1920**，所以下面的 PNG 像素坐标 == 设备坐标。
+
+```bash
+"$ANDROID_HOME/emulator/emulator.exe" -avd marginalia64 -no-skin -no-boot-anim
+"$ANDROID_HOME/platform-tools/adb.exe" wait-for-device
+```
 
 ### 用 adb 驱动 UI
 

@@ -21,17 +21,18 @@ margin. This app is a margin that answers back.
 
 ## Running it
 
-The environment is not on your PATH by default. `run-emulator.bat` starts the
-AVD, `run-app.bat` builds and installs on whatever device is attached, and both
-set `JAVA_HOME`, `ANDROID_HOME` and `PATH` themselves.
+Point `ANDROID_HOME` at your SDK and let Gradle find the JDK — both are pinned
+in `android/gradle.properties`, so there is nothing to export by hand:
 
-```
-..\run-emulator.bat          # boot the emulator (once)
-..\run-app.bat               # build + install + run
+```bash
+cd Marginalia
+flutter pub get
+flutter run
 ```
 
-`..\SETUP.md` covers the toolchain from scratch, `..\HOW_TO_RUN.md` the shorter
-version.
+`docs/BUILD.md` covers the whole toolchain: the SDK layout, why `avdmanager`
+needs a JDK 8 while the build needs 21, driving the emulator with `adb`, and the
+release checklist.
 
 ### It works with no keys at all
 

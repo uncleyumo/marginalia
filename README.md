@@ -45,10 +45,8 @@ dart tool/check_invariants.dart && dart tool/check_agent.dart
 flutter run
 ```
 
-Windows helpers live in the repository root — `run-emulator.bat` boots an AVD,
-`run-app.bat` builds and installs onto an attached device, `doctor.bat` finds out
-what is wrong in the order it goes wrong. All three set `JAVA_HOME`,
-`ANDROID_HOME` and `PATH` themselves, so nothing depends on your shell.
+`Marginalia/docs/BUILD.md` is the full manual — the SDK layout, the JDK, driving
+the emulator with `adb`, and the release checklist.
 
 ## The shape of it
 

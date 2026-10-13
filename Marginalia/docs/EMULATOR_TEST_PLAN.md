@@ -9,7 +9,7 @@
 
 | 项 | 值 |
 |---|---|
-| 设备 | `run-emulator.bat`，1080×1920，**PNG 像素坐标 == 设备坐标** |
+| 设备 | Android 模拟器，1080×1920，**PNG 像素坐标 == 设备坐标** |
 | 包名 | `com.marginalia.reader` |
 | SDK | `export ANDROID_HOME="/path/to/Android/sdk"` |
 | ADB | `"$ANDROID_HOME/platform-tools/adb.exe"`，路径带 `/` 时加 `MSYS_NO_PATHCONV=1` |

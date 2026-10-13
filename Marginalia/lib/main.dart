@@ -504,7 +504,8 @@ class _ShellState extends State<_Shell> {
         orElse: () => ListenSize.large,
       );
       _listenAutoPlay = lauto == 'on';
-      _listenAutoContinue = <String>{'off', 'forever', 'count'}.contains(lcont)
+      _listenAutoContinue = <String>{'off', 'forever', 'count', 'loop'}
+              .contains(lcont)
           ? lcont!
           : 'off';
       _listenAutoContinueCount = int.tryParse(lcontN ?? '') ?? 3;
@@ -1863,7 +1864,28 @@ class _ShellState extends State<_Shell> {
       listened: _listensInAll,
       onFinished: () => _onListenFinished(a),
       onNextArticle: _peekNextListen() != null ? _playNextArticle : null,
+      endMode: _listenAutoContinue,
+      endModeCount: _listenAutoContinueCount,
+      onEndMode: _setListenEndMode,
     );
+  }
+
+  /// The player's "when it ends" chips write here. Same four values as the
+  /// Settings key (`listen:autoContinue`), because the player and Settings are
+  /// two faces of one preference rather than two preferences.
+  void _setListenEndMode(String mode, int count) {
+    setState(() {
+      _listenAutoContinue = mode;
+      _listenAutoContinueCount = count;
+      // A count chosen mid-session takes effect NOW, not at next launch: the
+      // reader is standing at the player deciding how many more, and "starts
+      // counting from next app start" is a rule they would not expect.
+      // `forever` never consults the counter; `off` and `loop` never
+      // continue — `_onListenFinished` reads the mode first.
+      if (mode == 'count') _autoContinueLeft = count;
+    });
+    unawaited(_save('listen:autoContinue', mode));
+    unawaited(_save('listen:autoContinueCount', '$count'));
   }
 
   /// Listening counts as a LISTEN and never as a read. Conflating them would put
@@ -1884,10 +1906,14 @@ class _ShellState extends State<_Shell> {
   /// One completed play-through. Counting lives HERE rather than on Play,
   /// because the rule is "a full listen counts, a start does not". An
   /// interrupted pass never reaches `onFinished`, so it is never counted.
+  ///
+  /// `loop` never reaches here at all — the player wraps and keeps speaking —
+  /// but the guard is kept so a future caller cannot accidentally fall into
+  /// auto-continue while the reader asked for one article on repeat.
   Future<void> _onListenFinished(Article a) async {
     await _countListen(a);
     if (!mounted) return;
-    if (_listenAutoContinue == 'off') return;
+    if (_listenAutoContinue == 'off' || _listenAutoContinue == 'loop') return;
     if (_listenAutoContinue == 'count') {
       if (_autoContinueLeft <= 0) return;
       _autoContinueLeft--;
@@ -2108,6 +2134,9 @@ class _ShellState extends State<_Shell> {
       if (mounted) setState(() => _speakingIndex = -1);
       return;
     }
+    // Same narrator as the Listen screen for the same article — one piece, one
+    // voice, whichever screen asked for the sound.
+    _audio.narrate(a.id);
     setState(() => _speakingIndex = index);
     await _audio.play(index, a.sentences[index].english);
     if (mounted) setState(() => _speakingIndex = -1);
@@ -2608,20 +2637,6 @@ class _ShellState extends State<_Shell> {
       onListenAutoPlay: (bool on) {
         setState(() => _listenAutoPlay = on);
         unawaited(_save('listen:autoPlay', on ? 'on' : 'off'));
-      },
-      onListenAutoContinue: (String mode, int count) {
-        setState(() {
-          _listenAutoContinue = mode;
-          _listenAutoContinueCount = count;
-          // A count chosen mid-session takes effect NOW, not at next launch:
-          // the reader is standing in Settings deciding how many more, and
-          // "starts counting from next app start" is a rule they would not
-          // expect. `forever` never consults the counter; `off` never
-          // continues — `_onListenFinished` reads the mode first.
-          if (mode == 'count') _autoContinueLeft = count;
-        });
-        unawaited(_save('listen:autoContinue', mode));
-        unawaited(_save('listen:autoContinueCount', '$count'));
       },
       onListenAutoOrder: (String order) {
         setState(() => _listenAutoOrder = order);

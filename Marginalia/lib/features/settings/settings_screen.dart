@@ -92,8 +92,8 @@ class SettingsModel {
   final ReadingFace face;
 
   /// How the listening screen behaves. The stored spellings match main's
-  /// keys: autoPlay is 'off'/'on', autoContinue is 'off'/'forever'/'count',
-  /// autoOrder is one of the five `_orderWord` cases below.
+  /// keys: autoPlay is 'off'/'on', autoContinue is 'off'/'forever'/'count'/
+  /// 'loop', autoOrder is one of the five `_orderWord` cases below.
   final bool listenAutoPlay;
   final String listenAutoContinue;
   final int listenAutoContinueCount;
@@ -139,6 +139,7 @@ class SettingsModel {
       'forever' => 'keeps going, ${orderWord(listenAutoOrder)}',
       'count' =>
         'continues ${orderWord(listenAutoOrder)} · $listenAutoContinueCount times',
+      'loop' => 'loops the current article',
       _ => 'no auto-continue',
     };
     return '$open · $cont';
@@ -172,7 +173,6 @@ class SettingsScreen extends StatefulWidget {
     required this.onVoiceNameChanged,
     required this.onVoiceKeyChanged,
     required this.onListenAutoPlay,
-    required this.onListenAutoContinue,
     required this.onListenAutoOrder,
     required this.onProbeVoice,
     required this.onTestWriter,
@@ -222,10 +222,6 @@ class SettingsScreen extends StatefulWidget {
   // resay the other three.
 
   final ValueChanged<bool> onListenAutoPlay;
-
-  /// [mode] is 'off' | 'forever' | 'count'. [count] travels with it so the
-  /// reader can flip between Stop and a count without re-picking the number.
-  final void Function(String mode, int count) onListenAutoContinue;
 
   /// 'newest' | 'oldest' | 'mostStudied' | 'leastStudied' | 'random'.
   final ValueChanged<String> onListenAutoOrder;
@@ -1013,15 +1009,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // expression, so this has to be a final.
     //
     // `Random` is first and is a MODE, not an id: it rolls one of the real
-    // voices at the start of each playback. A reader who wants variety without
-    // choosing is exactly the person this option is for.
+    // voices for each ARTICLE. A reader who wants variety without choosing is
+    // exactly the person this option is for. One article keeps one narrator —
+    // rolling per sentence would make the piece unlistenable.
     final List<String> names = voiceChoices();
     final List<String>? v = await ChipPickerSheet.ask(
       context,
       title: 'Voice',
       note: 'MiMo publishes no list to fetch, so these are the built-in names. '
           'One of them speaks a word and you hear whether you like it. '
-          'Random picks one for you each time you start playing.',
+          'Random picks one narrator per article, and keeps it for that whole '
+          'piece.',
       initial: <String>[m.voiceName],
       presets: names,
     );
@@ -1059,11 +1057,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // offline voice has no reason to open a pane about MiMo keys just to stop
   // the screen from talking the moment it opens.
 
-  /// The preset counts on the chips. Not 6–9: the numbers a listener actually
-  /// picks for "a few more" are one for a single detour, three for a walk,
-  /// ten for a commute — a full 1..10 strip would make the common three
-  /// harder to hit, not easier, and Custom… covers the rest.
-  static const List<int> _continueCounts = <int>[1, 2, 3, 4, 5, 10];
+  /// The read-only summary of the player's "when it ends" chips. The writable
+  /// control is on the Listen screen; this pane only states what is set.
+  static String _endModeSummary(String mode, int count) => switch (mode) {
+        'forever' =>
+          'Keep going — the next article starts, and the next, until the queue ends.',
+        'count' =>
+          'Keep going a few more — $count more articles, then it stops.',
+        'loop' =>
+          'Loop this — the current article plays again from the top, forever.',
+        _ => 'Stop — nothing further plays until you ask.',
+      };
 
   Widget _listening(Palette c) {
     final String mode = m.listenAutoContinue;
@@ -1114,55 +1118,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
         const SizedBox(height: 22),
         const SectionLabel('When one article ends'),
-        _Choice(
-          title: 'Stop',
-          sub: 'nothing further plays until you ask',
-          selected: mode == 'off',
-          onTap: () => widget.onListenAutoContinue('off', count),
-        ),
-        const SizedBox(height: 8),
-        _Choice(
-          title: 'Keep going',
-          sub: 'the next article starts, and the next, until the queue ends',
-          selected: mode == 'forever',
-          onTap: () => widget.onListenAutoContinue('forever', count),
-        ),
-        const SizedBox(height: 8),
-        _Choice(
-          title: 'Keep going a few more',
-          sub: 'a set number of extras, then it stops — a walk, not a flight',
-          selected: mode == 'count',
-          onTap: () => widget.onListenAutoContinue('count', count),
-        ),
-        if (mode == 'count') ...<Widget>[
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 7,
-            runSpacing: 7,
-            children: <Widget>[
-              for (final int n in _continueCounts)
-                Pill(
-                  '$n',
-                  mono: false,
-                  color: count == n ? c.ink : null,
-                  background: count == n ? c.surface : null,
-                  borderColor: count == n ? c.verm : null,
-                  onTap: () => widget.onListenAutoContinue('count', n),
-                ),
-              // Selected when the count is NOT one of the chips, so a saved
-              // 7 stays visibly "mine" instead of silently reading as no
-              // selection at all.
-              Pill(
-                'Custom…',
-                mono: false,
-                color: !_continueCounts.contains(count) ? c.ink : null,
-                background: !_continueCounts.contains(count) ? c.surface : null,
-                borderColor: !_continueCounts.contains(count) ? c.verm : null,
-                onTap: _editContinueCount,
-              ),
-            ],
+        // Read-only on purpose. This is a play-mode decision the listener flips
+        // mid-commute, so the writable control lives on the player, next to the
+        // transport — and there is exactly one place that can change it, which
+        // is the only way two surfaces cannot drift apart.
+        Text(
+          _endModeSummary(mode, count),
+          style: TextStyle(
+            fontFamily: TypeScale.serif,
+            fontSize: 13,
+            height: 1.6,
+            color: c.ink,
           ),
-        ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Change it on the Listen screen, under the play button.',
+          style: TextStyle(
+            fontFamily: TypeScale.serif,
+            fontSize: 12.5,
+            height: 1.6,
+            color: c.ink3,
+          ),
+        ),
 
         const SizedBox(height: 22),
         const SectionLabel('Pick the next one by'),
@@ -1206,22 +1184,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ],
     );
-  }
-
-  Future<void> _editContinueCount() async {
-    final int? v = await NumberStepSheet.ask(
-      context,
-      title: 'How many more',
-      note: 'Articles that start by themselves after the one you began. '
-          'Then it stops and waits for you.',
-      value: m.listenAutoContinueCount,
-      min: 1,
-      max: 50,
-      step: 1,
-      suffix: 'more',
-    );
-    if (v == null || !mounted) return;
-    widget.onListenAutoContinue('count', v);
   }
 
   // ── Who writes ────────────────────────────────────────────────────────

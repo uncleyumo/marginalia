@@ -31,6 +31,7 @@ import 'package:flutter/material.dart';
 import '../../core/design/tokens.dart';
 import '../../core/widgets/back_label.dart';
 import '../../core/widgets/primitives.dart';
+import '../../core/widgets/sheets.dart';
 import '../../data/handler.dart';
 import '../../domain/models.dart';
 
@@ -78,6 +79,9 @@ class ListenScreen extends StatefulWidget {
     this.onWordTap,
     this.onFinished,
     this.onNextArticle,
+    this.endMode = 'off',
+    this.endModeCount = 3,
+    this.onEndMode,
   });
 
   final Article article;
@@ -131,6 +135,20 @@ class ListenScreen extends StatefulWidget {
   /// Null when there is nothing to go to, and the control is then not drawn.
   final VoidCallback? onNextArticle;
 
+  /// What happens when this article reaches its last sentence.
+  ///
+  /// 'off' | 'forever' | 'count' | 'loop'. This is a play-mode decision —
+  /// the listener flips it mid-commute, not once at install time — so it lives
+  /// on the player rather than in Settings, which is where it used to hide.
+  final String endMode;
+
+  /// How many extra articles the 'count' mode starts before stopping.
+  final int endModeCount;
+
+  /// The reader picked a different end mode (and, for 'count', how many more).
+  /// The parent owns the value and the persistence; this screen only shows it.
+  final void Function(String mode, int count)? onEndMode;
+
   @override
   State<ListenScreen> createState() => _ListenScreenState();
 }
@@ -141,11 +159,25 @@ class _ListenScreenState extends State<ListenScreen> {
   bool _busy = false;
   int _generation = 0;
 
+  /// Whether the first wrap of the current continuous run has been counted.
+  /// Reset whenever the run is broken — pause, jump, restart — so the next
+  /// full pass counts once more, and a loop left running overnight does not.
+  bool _loopCounted = false;
+
   Sentence get _current => widget.article.sentences[_index];
 
   @override
   void initState() {
     super.initState();
+    // One narrator for the whole article, rolled here — the article boundary
+    // is the only one that means anything to a listener. Every sentence after
+    // this keeps the voice, so Random is variety BETWEEN pieces rather than a
+    // new accent every line.
+    widget.player.narrate(widget.article.id);
+    // Head start. The reader is looking at sentence 1 before they press Play,
+    // so building the first sentences now is free work done during a moment
+    // that is already idle — and it is what makes Play feel instant.
+    _warm(0);
     _attachTransport();
     // Only when the reader asked for it AND this screen is already in front.
     // A parent that keeps this widget alive under an IndexedStack must not
@@ -163,6 +195,12 @@ class _ListenScreenState extends State<ListenScreen> {
   @override
   void didUpdateWidget(ListenScreen old) {
     super.didUpdateWidget(old);
+    // A different article is a different narrator, even if the parent kept this
+    // State alive. Cheap when it is the same article: `narrate` is a no-op.
+    if (old.article.id != widget.article.id) {
+      widget.player.narrate(widget.article.id);
+      _warm(0);
+    }
     if (widget.autoPlay && widget.active && !_autoStarted && !_playing) {
       _autoStarted = true;
       unawaited(_playCurrent());
@@ -174,6 +212,7 @@ class _ListenScreenState extends State<ListenScreen> {
     // Bump the generation first: a `_playFrom` further down the stack may still
     // be awaiting the engine, and it must not setState after this State is gone.
     _generation++;
+    widget.player.abandonPending();
     // Hand the transport back BEFORE the State goes away, so a lock-screen tap
     // arriving a moment later finds nobody home instead of calling into a
     // disposed State.
@@ -220,11 +259,39 @@ class _ListenScreenState extends State<ListenScreen> {
   /// sentence the reader had already navigated away from — and setState fired on
   /// a disposed State, which is the crash behind the red screen a screenshot
   /// showed.
+  /// How far ahead of the speaking sentence to synthesise.
+  ///
+  /// Two, not one: a short sentence finishes before a slow request returns,
+  /// and one-ahead then leaves the same gap it was meant to remove. Two costs
+  /// one extra warm call on a cache that is already keyed to ignore repeats.
+  static const int _warmAhead = 2;
+
+  /// Build the recordings for [from] onwards without playing them.
+  ///
+  /// The whole point is that synthesis happens WHILE something else is
+  /// audible. Opening the article warms the head of the piece (the reader is
+  /// looking at sentence 1 before they press Play), and each sentence that
+  /// starts speaking warms the ones behind it.
+  void _warm(int from) {
+    final List<Sentence> all = widget.article.sentences;
+    final int end = (from + _warmAhead).clamp(0, all.length);
+    for (int i = from.clamp(0, all.length); i < end; i++) {
+      widget.player.warm(all[i].english);
+    }
+  }
+
   Future<void> _playFrom(int index, int generation) async {
     setState(() => _index = index);
     _publish();
     while (generation == _generation && mounted) {
       if (_index >= widget.article.sentences.length) {
+        if (widget.endMode == 'loop') {
+          // A wrap, not a finish. One listen is counted for the first wrap of
+          // a continuous run — a full pass is a full pass — and not for every
+          // subsequent wrap, so an overnight loop cannot inflate `listens`.
+          _wrapForLoop();
+          continue;
+        }
         setState(() => _playing = false);
         _publish();
         // A completed pass, not a completed sentence. One `onFinished` per
@@ -235,12 +302,21 @@ class _ListenScreenState extends State<ListenScreen> {
       }
       setState(() => _playing = true);
       _publish();
+      // Warm what comes next BEFORE this sentence starts: the whole idea is
+      // that synthesis runs underneath audible speech rather than in the gap
+      // after it. `_warm` re-warms the same window as the index advances, and
+      // the cache makes the repeats free.
+      _warm(_index + 1);
       await widget.player.play(_index, widget.article.sentences[_index].english);
       if (generation != _generation || !mounted) return;
       if (_index < widget.article.sentences.length - 1) {
         setState(() => _index++);
         _publish();
       } else {
+        if (widget.endMode == 'loop') {
+          _wrapForLoop();
+          continue;
+        }
         setState(() => _playing = false);
         _publish();
         widget.onFinished?.call();
@@ -262,6 +338,8 @@ class _ListenScreenState extends State<ListenScreen> {
   Future<void> _toggle() async {
     if (_playing) {
       _generation++;
+      // A pause breaks the continuous run: the next full pass is a new one.
+      _loopCounted = false;
       await widget.player.pause();
       if (mounted) setState(() => _playing = false);
       _publish();
@@ -285,9 +363,29 @@ class _ListenScreenState extends State<ListenScreen> {
         (_index + delta).clamp(0, widget.article.sentences.length - 1);
     if (next == _index) return;
     _generation++;
+    _loopCounted = false;
+    // The listener skipped. Sentences queued for warm-up behind the old
+    // position are no longer next — without this, tapping "next" through a
+    // 20-line piece would synthesise all nineteen lines passed over.
+    widget.player.abandonPending();
     await widget.player.stop();
     if (!mounted) return;
     unawaited(_playFrom(next, _generation));
+  }
+
+  /// Loop mode reached the end of the article: start it again from the top.
+  ///
+  /// Counts one listen for the first wrap of a continuous run. A full pass is
+  /// a full pass and deserves the ledger entry; the second and tenth wrap of
+  /// the same overnight run do not, or the counter stops meaning "how many
+  /// times have I met this piece" and starts meaning "how long was I asleep".
+  void _wrapForLoop() {
+    if (!_loopCounted) {
+      _loopCounted = true;
+      widget.onCountListen();
+    }
+    setState(() => _index = 0);
+    _publish();
   }
 
   /// Start this article again from sentence one, and speak it.
@@ -297,6 +395,8 @@ class _ListenScreenState extends State<ListenScreen> {
   /// on sentence 1 with the play button still meaning "resume here".
   Future<void> _restart() async {
     _generation++;
+    _loopCounted = false;
+    widget.player.abandonPending();
     await widget.player.stop();
     if (!mounted) return;
     unawaited(_playFrom(0, _generation));
@@ -459,6 +559,12 @@ class _ListenScreenState extends State<ListenScreen> {
               ],
             ),
             const SizedBox(height: 12),
+            // What happens when this article ends is a play-mode decision the
+            // listener flips mid-commute, so it sits here on the player and not
+            // three taps deep in Settings. Four mutually exclusive options —
+            // loop and auto-continue cannot both own the ending.
+            _endModeRow(context, c),
+            const SizedBox(height: 12),
             // Article-level transport. Sentences above, the piece as a whole
             // here: "again from the start" and "the next article" are the two
             // things a commuter asks for once a piece ends, and neither is a
@@ -537,6 +643,77 @@ class _ListenScreenState extends State<ListenScreen> {
           tip: 'Larger',
           size: 34,
           onTap: canGrow ? () => _resize(_size.larger) : null,
+        ),
+      ],
+    );
+  }
+
+  /// When this article ends: stop, continue into the next, continue a few, or
+  /// loop this one. High-frequency, so it is one tap from the transport.
+  ///
+  /// Loop is a fourth end mode rather than a separate switch on purpose: with
+  /// two switches "loop this" and "keep going" can both be on, and then the
+  /// ending is ambiguous. One row of four mutually exclusive chips cannot
+  /// contradict itself.
+  Widget _endModeRow(BuildContext context, Palette c) {
+    final String mode = widget.endMode;
+    final int count = widget.endModeCount;
+    Widget chip(String label, String value, {VoidCallback? onTap}) {
+      final bool on = mode == value;
+      return Pill(
+        label,
+        mono: false,
+        color: on ? c.ink : null,
+        background: on ? c.surface : null,
+        borderColor: on ? c.verm : null,
+        onTap: onTap,
+      );
+    }
+
+    return Column(
+      children: <Widget>[
+        Text(
+          'when it ends',
+          style: TextStyle(
+            fontFamily: TypeScale.mono,
+            fontSize: 10.5,
+            color: c.ink3,
+          ),
+        ),
+        const SizedBox(height: 7),
+        Wrap(
+          spacing: 7,
+          runSpacing: 7,
+          alignment: WrapAlignment.center,
+          children: <Widget>[
+            chip('Stop', 'off',
+                onTap: () => widget.onEndMode?.call('off', count)),
+            chip('Keep going', 'forever',
+                onTap: () => widget.onEndMode?.call('forever', count)),
+            chip('×$count', 'count', onTap: () async {
+              // First tap picks the mode; a second tap on the already-selected
+              // chip edits the number, which keeps the common case one tap and
+              // still leaves the count reachable without a detour.
+              if (mode != 'count') {
+                widget.onEndMode?.call('count', count);
+                return;
+              }
+              final int? v = await NumberStepSheet.ask(
+                context,
+                title: 'How many more',
+                note: 'Articles that start by themselves after the one you '
+                    'began. Then it stops and waits for you.',
+                value: count,
+                min: 1,
+                max: 50,
+                step: 1,
+                suffix: 'more',
+              );
+              if (v != null) widget.onEndMode?.call('count', v);
+            }),
+            chip('Loop this', 'loop',
+                onTap: () => widget.onEndMode?.call('loop', count)),
+          ],
         ),
       ],
     );

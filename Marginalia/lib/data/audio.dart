@@ -75,6 +75,29 @@ abstract class SentencePlayer {
 
   Future<void> stop();
 
+  /// Start narrating [articleId].
+  ///
+  /// This is where a Random roll happens — once per article, not once per
+  /// sentence. See [SentenceAudio.narrate].
+  void narrate(String articleId);
+
+  /// Begin building [text] into the recording cache WITHOUT playing it.
+  ///
+  /// Returns immediately; the work happens in the background. This is the
+  /// whole of the TTS latency strategy: while sentence N is speaking, N+1 is
+  /// already being synthesised, so the join between them is a file open
+  /// instead of a network round-trip. A no-op when there is no recorded voice
+  /// to build with — the device engine has nothing to prepare.
+  void warm(String text);
+
+  /// Drop everything queued but not yet started.
+  ///
+  /// Tapping "next" twenty times must not synthesise the nineteen sentences
+  /// the listener skipped past. Called when the reader moves somewhere else;
+  /// [stop] deliberately does NOT do this, because [play] stops before every
+  /// sentence and would throw away its own warm-up.
+  void abandonPending();
+
   /// Pause. There is no portable resume that continues mid-word, so [resume]
   /// re-speaks from the start of the sentence — stated on screen, not hidden.
   Future<void> pause();
@@ -134,10 +157,13 @@ class SentenceAudio implements SentencePlayer {
   ///
   /// Equal to [_voice] unless the reader picked [kVoiceRandom]. Random is a
   /// MODE, not an id: the API would reject it. One roll covers a whole
-  /// playback, so an article is spoken by one narrator and the next article
-  /// may be somebody else — a voice that changed mid-sentence would be a
-  /// glitch, a voice that changes between articles is variety.
+  /// article, so every sentence is spoken by the same narrator — a voice that
+  /// changed sentence to sentence would make the piece unlistenable, and a
+  /// voice that changes between articles is the variety Random is for.
+  /// The roll lives in [narrate], not in [stop]: [play] stops the previous
+  /// sentence on every call, so rolling there would re-roll per sentence.
   String _speakingAs = VoiceEndpoint.mimo.voices.first;
+
   bool _sessionReady = false;
 
   @override
@@ -169,21 +195,40 @@ class SentenceAudio implements SentencePlayer {
     if (baseUrl.trim().isNotEmpty) _baseUrl = baseUrl.trim();
     if (voice.trim().isNotEmpty) {
       _voice = voice.trim();
-      _speakingAs = _resolveVoice(_voice);
+      // A mode change takes effect on the article that is open now, not on the
+      // next one. `articleId` is '' here because no article is being narrated
+      // yet — the next `narrate` will resolve properly.
+      _speakingAs = _resolveVoice(_voice, '');
     }
   }
 
   /// Roll a real id for [kVoiceRandom], or pass the id through.
   ///
   /// Random excludes itself and nothing else: `mimo_default` is a real voice
-  /// and is a fine roll. Seeded from the clock's microseconds, because a
-  /// `Random()` created once at boot can hand back the same voice on every
-  /// roll for a whole session, which is not random, it is a stuck one.
-  static String _resolveVoice(String wanted) {
+  /// and is a fine pick. The choice is DETERMINISTIC in [articleId] rather
+  /// than drawn from a clock: the recording cache is keyed on voice + text, so
+  /// a voice that could differ between runs would make every replay a fresh
+  /// batch of TTS requests and a fresh pile of orphaned wav files. Hashing the
+  /// article gives variety across articles and a stable narrator within one.
+  static String _resolveVoice(String wanted, String articleId) {
     if (wanted != kVoiceRandom) return wanted;
     final List<String> real = VoiceEndpoint.mimo.voices;
     if (real.isEmpty) return 'mimo_default';
-    return real[DateTime.now().microsecondsSinceEpoch % real.length];
+    return real[int.parse(_hash(articleId), radix: 16) % real.length];
+  }
+
+  /// Start narrating [articleId]. The ONE place the Random choice is applied.
+  ///
+  /// Called when an article opens, which is the boundary the choice belongs
+  /// on: one article, one narrator. Resolving inside [stop] looked equivalent
+  /// and was not — [play] stops the previous sentence on every call, so the
+  /// narrator was re-resolved sentence by sentence and the piece became
+  /// unlistenable. The same article always resolves to the same voice, so a
+  /// sentence tapped on the Read screen, the Listen screen and a second
+  /// listen next week all agree on who is speaking.
+  @override
+  void narrate(String articleId) {
+    _speakingAs = _resolveVoice(_voice, articleId);
   }
 
   /// Set the engine up once. Called from the constructor and not awaited: nothing
@@ -278,7 +323,7 @@ class SentenceAudio implements SentencePlayer {
     // A recorded voice, when one is configured and one can be had. Any failure
     // at all falls THROUGH to the device engine rather than leaving a gap.
     if (_configured == VoiceSource.recorded && _apiKey.isNotEmpty) {
-      final String? path = await _cachedRecording(text);
+      final String? path = await _cachedRecording(text, urgent: true);
       if (path != null) {
         final bool played = await _playFile(path);
         if (played) {
@@ -324,9 +369,50 @@ class SentenceAudio implements SentencePlayer {
   /// A synthesised sentence is a fact about the phone, not about the network:
   /// hearing it again must not cost another request. So the cache is keyed by
   /// the voice AND the exact words, and a hit never touches the network at all.
-  Future<String?> _cachedRecording(String text) async {
+  Future<String?> _cachedRecording(String text,
+      {bool urgent = false, int? epoch}) async {
     final File file = await _recordingFile(text);
     if (file.existsSync() && file.lengthSync() > 1024) return file.path;
+
+    // Already on the wire or already claimed: join it rather than paying for
+    // the same sentence twice and racing two writers at one `.part` file.
+    final Future<String?>? inflight = _inflight[text];
+    if (inflight != null) return inflight;
+
+    // Gate and epoch check come BEFORE claiming the memo, and that order is
+    // the whole correctness argument. An abandoned warm must never occupy the
+    // memo slot: a `play` arriving at the same sentence would otherwise join
+    // a future that is about to complete as `null` and fall through to the
+    // device voice for a recording that was never made.
+    await _acquireSynth(urgent: urgent);
+    // Re-check after the wait. A sentence that queued behind a full pipe can
+    // find, when it finally gets a slot, that the reader has skipped past it.
+    // Only warm work carries an epoch — a play is always wanted, because
+    // somebody is sitting through silence waiting for exactly that sentence.
+    if (epoch != null && epoch != _warmEpoch) {
+      _releaseSynth();
+      return null;
+    }
+    final Future<String?>? raced = _inflight[text];
+    if (raced != null) {
+      // Somebody claimed it while we waited on the gate. Their slot covers
+      // the request; ours goes back.
+      _releaseSynth();
+      return raced;
+    }
+
+    final Future<String?> job = _speakToCache(file, text);
+    _inflight[text] = job;
+    unawaited(job.whenComplete(() {
+      _inflight.remove(text);
+      _releaseSynth();
+    }));
+    return job;
+  }
+
+  /// The network call and the write to disk. No gating here — see
+  /// [_cachedRecording], which owns the gate and the memo.
+  Future<String?> _speakToCache(File file, String text) async {
     try {
       final List<int> bytes = await _api.speak(
         baseUrl: _baseUrl,
@@ -345,6 +431,104 @@ class SentenceAudio implements SentencePlayer {
     } catch (e) {
       debugPrint('MiMo recording failed: $e');
       return null;
+    }
+  }
+
+  /// Requests already on the wire, keyed by the same string as the cache file.
+  final Map<String, Future<String?>> _inflight = <String, Future<String?>>{};
+
+  /// Sentences waiting for a synthesise slot, next-to-play first.
+  ///
+  /// A queue rather than a free-for-all on purpose: tapping "next" through a
+  /// piece enqueues every sentence passed over, and those must not become one
+  /// HTTP request each all at once. The cap is on REQUESTS IN FLIGHT, not on
+  /// how much is queued — queueing is free, requests are not.
+  final List<String> _warmQueue = <String>[];
+
+  /// How many synthesises may touch the network at once.
+  ///
+  /// One is polite but leaves the pipe idle while a long sentence plays; three
+  /// is enough that one slow request holds up the whole queue behind it. Two
+  /// sits between them.
+  static const int _maxConcurrentSynth = 2;
+  int _synthInFlight = 0;
+
+  /// Callers parked waiting for a slot. FIFO, and `play` is pushed to the
+  /// FRONT because it is the one a listener is sitting through silence for.
+  final List<({Completer<void> gate, bool urgent})> _synthWaiters =
+      <({Completer<void> gate, bool urgent})>[];
+
+  /// Bumped when the reader moves somewhere else, so queued work that is no
+  /// longer next can be dropped instead of paid for.
+  int _warmEpoch = 0;
+
+  /// Take a synthesise slot, waiting if the pipe is full.
+  Future<void> _acquireSynth({bool urgent = false}) async {
+    if (_synthInFlight < _maxConcurrentSynth) {
+      _synthInFlight++;
+      return;
+    }
+    final Completer<void> gate = Completer<void>();
+    _synthWaiters.add((gate: gate, urgent: urgent));
+    if (urgent && _synthWaiters.length > 1) {
+      // Jump the line: the listener is waiting on THIS one.
+      _synthWaiters
+        ..removeLast()
+        ..insert(0, (gate: gate, urgent: true));
+    }
+    await gate.future;
+  }
+
+  void _releaseSynth() {
+    while (_synthWaiters.isNotEmpty) {
+      final ({Completer<void> gate, bool urgent}) next = _synthWaiters.removeAt(0);
+      // The slot is transferred rather than returned to the counter, so a
+      // waiter wakes already holding it and nobody else can steal it in
+      // between.
+      if (!next.gate.isCompleted) {
+        next.gate.complete();
+        // A freed slot may let the warm queue move again. Without this kick a
+        // pair of `play` requests that held both slots would leave whatever
+        // was queued behind them stalled forever.
+        unawaited(_drainWarm());
+        return;
+      }
+    }
+    _synthInFlight--;
+    unawaited(_drainWarm());
+  }
+
+  @override
+  void warm(String text) {
+    // Nothing to prepare for the device engine, and nothing to prepare when
+    // there is no key — both cases speak live and cost nothing to 'miss'.
+    if (_configured != VoiceSource.recorded || _apiKey.isEmpty) return;
+    if (_inflight.containsKey(text) || _warmQueue.contains(text)) return;
+    // The sentence about to play matters more than one queued when the
+    // listener was still three sentences back, so newest intent goes to the
+    // FRONT and the queue drains from the front.
+    _warmQueue.insert(0, text);
+    unawaited(_drainWarm());
+  }
+
+  @override
+  void abandonPending() {
+    // The reader jumped. What was queued was queued for a moment that has
+    // gone. Requests already in flight are kept: those bytes are paid for and
+    // the cache will use them whenever the sentence comes round again.
+    _warmEpoch++;
+    _warmQueue.clear();
+  }
+
+  Future<void> _drainWarm() async {
+    while (_warmQueue.isNotEmpty && _synthInFlight < _maxConcurrentSynth) {
+      final String text = _warmQueue.removeAt(0);
+      final int epoch = _warmEpoch;
+      // Re-check AFTER the dequeue: a jump while we were waiting makes this a
+      // sentence nobody wants any more. Dropping here is the whole point of
+      // the epoch — the request that would have been paid for never starts.
+      if (epoch != _warmEpoch) continue;
+      unawaited(_cachedRecording(text, urgent: false, epoch: epoch));
     }
   }
 
@@ -401,13 +585,10 @@ class SentenceAudio implements SentencePlayer {
     final Completer<void>? c = _current;
     _current = null;
     _currentText = '';
-    // A new playback gets a new narrator when the reader asked for Random.
-    // Stopping is the boundary between "this article" and "the next thing",
-    // which is the only boundary at which changing voice is a choice rather
-    // than a glitch.
-    if (_voice == kVoiceRandom) {
-      _speakingAs = _resolveVoice(kVoiceRandom);
-    }
+    // No voice roll here. `play` calls `stop` before every sentence, so a roll
+    // in this method re-rolled the narrator sentence by sentence — which is
+    // the bug where Random made an article unlistenable. The roll lives in
+    // [narrate], which fires once per article.
     try {
       await _tts.stop();
     } catch (_) {
@@ -451,7 +632,7 @@ class SentenceAudio implements SentencePlayer {
   Future<void> resume() async {
     if (_currentText.isEmpty) return;
     if (_configured == VoiceSource.recorded && _apiKey.isNotEmpty) {
-      final String? path = await _cachedRecording(_currentText);
+      final String? path = await _cachedRecording(_currentText, urgent: true);
       if (path != null && await _playFile(path)) {
         _lastSpoken = VoiceSource.recorded;
         return;

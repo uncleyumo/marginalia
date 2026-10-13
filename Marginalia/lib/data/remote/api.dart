@@ -171,9 +171,28 @@ List<String> voiceChoices() =>
 /// The instruction sent with every synthesis. A recorded voice with no
 /// direction reads like a radio advert; one sentence of direction is the
 /// difference between a recording and a narrator.
+///
+/// MiMo has no accent parameter — nothing in `audio` selects a dialect, and the
+/// audio-tag list carries no English accents at all. Accent is reached the same
+/// way emotion and pace are: by describing it in the `user` message, which the
+/// model follows. The docs' own voice-design example asks for a "heavy Russian
+/// accent" in prose, so the mechanism is real; what it needs is a description
+/// specific enough to act on.
+///
+/// "Neutral accent" was the old wording and it is precisely the kind of phrase
+/// the docs warn against — a term with no referent, which the model can only
+/// resolve to whatever its training set calls neutral, and the four English
+/// voices are not all the same dialect. Naming General American directly, and
+/// saying what to avoid, gives it something to steer by.
+///
+/// The rest is unchanged in intent and sharper in wording: clear consonants and
+/// an unhurried pace are what a reader studying the language needs, and a
+/// documentary reader is the register that delivers them.
 const String kNarratorInstruction =
-    'A calm adult narrator reading an English article aloud for someone '
-    'studying English. Clear, unhurried, neutral accent, natural phrasing.';
+    'A General American narrator reading an English article aloud for someone '
+    'studying English. Standard American accent and pronunciation throughout — '
+    'clear consonants, unhurried pace, natural phrasing and sentence rhythm. '
+    'Even and steady, like a documentary reader rather than a radio advert.';
 
 /// The HTTP client. Thin on purpose: an interceptor stack would be machinery
 /// without a job when there are two request shapes.

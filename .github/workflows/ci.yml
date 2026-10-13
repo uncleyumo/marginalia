@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # The version this is developed on. Caret ranges in pubspec mean an
+          # older SDK still resolves, but a pinned one means a green run here
+          # is a green run on the machine it was written on.
+          flutter-version: '3.44.3'
+
+      - name: pub get
+        run: flutter pub get
+
+      # --no-fatal-infos: the repo carries 88 style infos (mostly `print` in
+      # the tool/ scripts, which are CLI tools and print on purpose). They are
+      # not worth fixing to make CI green, and they are not worth failing a
+      # build over either.
+      - name: analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: test
+        run: flutter test
+
+      # The invariants and the agent contract are the spec, run as programs
+      # rather than as tests — a change that breaks one is a change to the
+      # design and should be reviewed as one.
+      - name: invariants
+        run: dart tool/check_invariants.dart
+
+      - name: agent contract
+        run: dart tool/check_agent.dart

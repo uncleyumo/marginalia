@@ -140,7 +140,7 @@ slot.state ∈ {planned, ready}        永远只有这两种
 | Flutter 工程 | **不存在**。`E:\Dev_work\Flutter_Dev\marginalia\` 下只有 `Marginalia-Prototype/`，无 `pubspec.yaml` |
 | 原型资产 | 完整。8 个文件：`prototype.html`(3159行) · `DESIGN.md`(1161行) · `impeccable-design-context.md` · `tts.py`(331行) · `dictsource.py` · `settings.example.json` · `fetch_ecdict.sh` |
 | Flutter SDK | `E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable`，Dart 3.12.2 |
-| Android SDK | `E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352`，已装 platform `android-26 / 28 / 29 / 35`，build-tools `35.0.0`；**未装 android-34**，故 compileSdk 用 35 |
+| Android SDK | 本机 SDK 路径，已装 platform `android-26 / 28 / 29 / 35`，build-tools `35.0.0`；**未装 android-34**，故 compileSdk 用 35 |
 | JDK | GraalVM 21.0.7 ✓ |
 | ⚠️ 工具链故障 | `flutter` 命令在本会话中因 Windows 管道错误（`All pipe instances are busy`，`where.exe` 调用失败）无法执行；`dart` 本身正常。**这是环境问题，非配置问题**——需你协助或改期重试 |
 

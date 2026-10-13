@@ -12,9 +12,15 @@ REM ============================================================================
 
 setlocal enabledelayedexpansion
 
-set "SDK=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+REM  Paths come from the environment when it has them, and fall back to the
+REM  machine this was written on when it does not. That keeps the script
+REM  useful as-is for the author and runnable anywhere else — set SDK_HOME and
+REM  APK_PATH in your shell and nothing below needs editing.
+if "%SDK_HOME%"==""     set "SDK_HOME=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+if "%APK_PATH%"==""     set "APK_PATH=E:\Dev_work\Flutter_Dev\marginalia\Marginalia\build\app\outputs\flutter-apk\app-debug.apk"
+set "SDK=%SDK_HOME%"
 set "ADB=%SDK%\platform-tools\adb.exe"
-set "APK=E:\Dev_work\Flutter_Dev\marginalia\Marginalia\build\app\outputs\flutter-apk\app-debug.apk"
+set "APK=%APK_PATH%"
 set "PKG=com.marginalia.reader"
 
 echo.

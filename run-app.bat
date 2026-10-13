@@ -14,10 +14,18 @@ REM ============================================================================
 
 setlocal
 
-set "SDK=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
-set "PROJECT=E:\Dev_work\Flutter_Dev\marginalia\Marginalia"
-set "FLUTTER=E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable"
-set "JDK=E:\Dev_work\Java_Dev\JDK_SRC\JDK_21"
+REM  Every path is read from the environment first and falls back to the
+REM  machine this was written on. Set SDK_HOME / PROJECT_HOME / FLUTTER_HOME /
+REM  JDK_HOME in your shell and nothing below needs editing; leave them unset
+REM  and it runs exactly as it always did here.
+if "%SDK_HOME%"==""     set "SDK_HOME=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+if "%PROJECT_HOME%"=="" set "PROJECT_HOME=E:\Dev_work\Flutter_Dev\marginalia\Marginalia"
+if "%FLUTTER_HOME%"=="" set "FLUTTER_HOME=E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable"
+if "%JDK_HOME%"==""     set "JDK_HOME=E:\Dev_work\Java_Dev\JDK_SRC\JDK_21"
+set "SDK=%SDK_HOME%"
+set "PROJECT=%PROJECT_HOME%"
+set "FLUTTER=%FLUTTER_HOME%"
+set "JDK=%JDK_HOME%"
 set "ADB=%SDK%\platform-tools\adb.exe"
 
 set "JAVA_HOME=%JDK%"

@@ -11,7 +11,7 @@
 |---|---|
 | 设备 | `run-emulator.bat`，1080×1920，**PNG 像素坐标 == 设备坐标** |
 | 包名 | `com.marginalia.reader` |
-| SDK | `export ANDROID_HOME="E:\\Dev_work\\Android_Dev\\Dev_Tools\\Android_SDK\\SDK_For_AS352"` |
+| SDK | `export ANDROID_HOME="/path/to/Android/sdk"` |
 | ADB | `"$ANDROID_HOME/platform-tools/adb.exe"`，路径带 `/` 时加 `MSYS_NO_PATHCONV=1` |
 
 **驱动 UI 的三条铁律**（以前踩过）：

@@ -47,18 +47,19 @@ setx FLUTTER_STORAGE_BASE_URL "https://storage.flutter-io.cn"
 
 ---
 
-## 1. 已完成：设置环境变量
+## 1. 设置环境变量
 
 ```powershell
-$env:ANDROID_HOME     = "E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+$env:ANDROID_HOME     = "D:\Android\Sdk"        # 你的 Android SDK 路径
 $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
-$env:JAVA_HOME        = "E:\Dev_work\Java_Dev\JDK_SRC\JDK_21_GRAALVM"
+$env:JAVA_HOME        = "D:\Java\jdk-21"        # 你的 JDK 21 路径
 ```
 
 要永久生效，把这三行写进「系统属性 → 环境变量」。
 
-> **注意目录名**：本机 Android SDK 真实路径是 `...\Android_SDK\SDK_For_AS352`，**不是** `...\Android_SDK`。多一层子目录，我已确认。
-> `android/local.properties` 已由 `flutter create` 自动写入 `flutter.sdk`，这一项你不用再操心。
+> **注意**：Android Studio 的 SDK 常藏在 `AppData\Local\Android\Sdk`，而独立安装的
+> 可能在别的层级。以你机器上真实存在 `platform-tools\adb.exe` 的那一层为准。
+> `android/local.properties` 已由 `flutter create` 自动写入 `flutter.sdk`。
 
 ## 2. 已完成：生成 Android 包装层
 
@@ -186,11 +187,13 @@ flutter_lints 6.0.0 · build_runner 2.15.1 · drift_dev 2.34.0 · json_serializa
 
 ## 附：路径速查
 
+以仓库根为基准，SDK 与 JDK 的路径因机器而异。
+
 | 用途 | 路径 |
 |---|---|
-| 项目根（你要 cd 进去） | `E:\Dev_work\Flutter_Dev\marginalia\Marginalia` |
-| 原型（只读，不改） | `E:\Dev_work\Flutter_Dev\marginalia\Marginalia-Prototype` |
-| 规划文档 | `E:\Dev_work\Flutter_Dev\marginalia\FLUTTER_PLAN.md` |
-| Flutter SDK | `E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable` |
-| Android SDK | `E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352` |
-| JDK | `E:\Dev_work\Java_Dev\JDK_SRC\JDK_21_GRAALVM` |
+| Flutter 项目 | `Marginalia/` |
+| 原型（只读，不改） | `Marginalia-Prototype/` |
+| 规划文档 | `FLUTTER_PLAN.md` |
+| Flutter SDK | 你的 Flutter SDK 安装位置 |
+| Android SDK | 你的 Android SDK 安装位置 |
+| JDK | 你的 JDK 21 安装位置 |

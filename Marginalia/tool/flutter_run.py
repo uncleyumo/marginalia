@@ -21,17 +21,37 @@ import os
 import subprocess
 import sys
 
-SDK = r'E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable\bin\flutter.bat'
-PROJECT = r'E:\Dev_work\Flutter_Dev\marginalia\Marginalia'
+# Every path is read from the environment first and falls back to the machine
+# this was written on, so the script runs anywhere and still runs here with no
+# setup. Set SDK_HOME / PROJECT_HOME / FLUTTER_HOME / JDK_HOME to override.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _env(name, fallback):
+    value = os.environ.get(name, '').strip()
+    return value if value else fallback
+
+
+SDK = _env(
+    'SDK_HOME',
+    r'E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352')
+FLUTTER = _env(
+    'FLUTTER_HOME',
+    r'E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable')
+PROJECT = _env(
+    'PROJECT_HOME',
+    r'E:\Dev_work\Flutter_Dev\marginalia\Marginalia')
+JDK = _env('JDK_HOME', r'E:\Dev_work\Java_Dev\JDK_SRC\JDK_21_GRAALVM')
+
 LOG = os.path.join(PROJECT, 'build', 'flutter_run.log')
 
 env = dict(os.environ)
 env['PUB_HOSTED_URL'] = 'https://pub.flutter-io.cn'
 env['FLUTTER_STORAGE_BASE_URL'] = 'https://storage.flutter-io.cn'
-env['ANDROID_HOME'] = r'E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352'
-env['ANDROID_SDK_ROOT'] = env['ANDROID_HOME']
-env['JAVA_HOME'] = r'E:\Dev_work\Java_Dev\JDK_SRC\JDK_21_GRAALVM'
-env['PATH'] = env['ANDROID_HOME'] + os.pathsep + env['JAVA_HOME'] + os.pathsep + env['PATH']
+env['ANDROID_HOME'] = SDK
+env['ANDROID_SDK_ROOT'] = SDK
+env['JAVA_HOME'] = JDK
+env['PATH'] = os.pathsep.join([SDK, JDK, env['PATH']])
 
 # CI mode makes the tools quieter and, more importantly, keeps it from trying to
 # phone home for version checks — which is another subprocess.
@@ -49,7 +69,7 @@ flags = getattr(subprocess, 'DETACHED_PROCESS', 0x00000008) | getattr(
     subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
 with open(LOG, 'wb') as out:
     proc = subprocess.Popen(
-        [SDK] + args,
+        [os.path.join(FLUTTER, 'bin', 'flutter.bat')] + args,
         cwd=PROJECT,
         env=env,
         stdout=out,

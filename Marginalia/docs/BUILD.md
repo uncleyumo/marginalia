@@ -8,10 +8,10 @@
 ## 0. 三条命令（急着要 APK 的话）
 
 ```bash
-cd E:/Dev_work/Flutter_Dev/marginalia/Marginalia
+cd Marginalia
 
 # 1. 设 SDK 路径。每个新开的 shell 都要设一次，不设 build 会报 No Android SDK found
-export ANDROID_HOME="E:\\Dev_work\\Android_Dev\\Dev_Tools\\Android_SDK\\SDK_For_AS352"
+export ANDROID_HOME="/path/to/Android/sdk"
 
 # 2. 静态检查 + 两条可执行规则（约 15 秒，不碰网络）
 flutter analyze --no-pub
@@ -37,8 +37,8 @@ MSYS_NO_PATHCONV=1 "$ADB" install -r build/app/outputs/flutter-apk/app-release.a
 
 | 东西 | 在哪 | 为什么要单独说 |
 |---|---|---|
-| Android SDK | `E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352` | 路径写在 `android/local.properties` 的 `sdk.dir`。**`flutter build` 只认 `ANDROID_HOME` 环境变量**，不会去读那个文件，所以每个 shell 都要 export |
-| JDK 21 | `E:\Dev_work\Java_Dev\JDK_SRC\JDK_21` | 已经钉在 `android/gradle.properties` 的 `org.gradle.java.home`，**不需要设 `JAVA_HOME`**。见下面「为什么钉 JDK」 |
+| Android SDK | 你的 Android SDK 路径（见上） | 路径写在 `android/local.properties` 的 `sdk.dir`。**`flutter build` 只认 `ANDROID_HOME` 环境变量**，不会去读那个文件，所以每个 shell 都要 export |
+| JDK 21 | 一个 JDK 21 的路径 | 已经钉在 `android/gradle.properties` 的 `org.gradle.java.home`，**不需要设 `JAVA_HOME`**。见下面「为什么钉 JDK」 |
 | `adb` | `$ANDROID_HOME/platform-tools/adb.exe` | 不在 PATH 上。**Git Bash 里任何以 `/` 开头的设备路径都要加 `MSYS_NO_PATHCONV=1`**，否则 Git Bash 会把它改写成 Windows 路径，adb 报 `remote secure_mkdirs failed` |
 
 `flutter analyze` 和 `dart` **不需要** `ANDROID_HOME`，只有 Gradle 需要。
@@ -203,7 +203,7 @@ MSYS_NO_PATHCONV=1 "$ADB" logcat -d -s flutter:* | grep -E "flutter : \["
 ### 每次改动
 
 ```bash
-export ANDROID_HOME="E:\\Dev_work\\Android_Dev\\Dev_Tools\\Android_SDK\\SDK_For_AS352"
+export ANDROID_HOME="/path/to/Android/sdk"
 flutter analyze --no-pub          # lib/ 必须 0 error 0 warning
 dart tool/check_invariants.dart   # 126 项
 dart tool/check_agent.dart        # 45 项

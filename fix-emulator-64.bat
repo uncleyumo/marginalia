@@ -17,8 +17,13 @@ REM ============================================================================
 
 setlocal
 
-set "SDK=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
-set "JDK8=E:\Dev_work\Java_Dev\JDK_SRC\JDK_1.8"
+REM  Every path is read from the environment first and falls back to the
+REM  machine this was written on. Set SDK_HOME / JDK8_HOME and nothing below
+REM  needs editing.
+if "%SDK_HOME%"==""  set "SDK_HOME=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+if "%JDK8_HOME%"=="" set "JDK8_HOME=E:\Dev_work\Java_Dev\JDK_SRC\JDK_1.8"
+set "SDK=%SDK_HOME%"
+set "JDK8=%JDK8_HOME%"
 set "SDKMANAGER=%SDK%\tools\bin\sdkmanager.bat"
 set "AVDMANAGER=%SDK%\tools\bin\avdmanager.bat"
 set "ANDROID_HOME=%SDK%"

@@ -12,11 +12,19 @@ REM ============================================================================
 
 setlocal
 
-set "SDK=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
-set "PROJECT=E:\Dev_work\Flutter_Dev\marginalia\Marginalia"
-set "FLUTTER=E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable"
-set "JDK8=E:\Dev_work\Java_Dev\JDK_SRC\JDK_1.8"
-set "JDK21=E:\Dev_work\Java_Dev\JDK_SRC\JDK_21"
+REM  Every path is read from the environment first and falls back to the
+REM  machine this was written on. Set SDK_HOME / PROJECT_HOME / FLUTTER_HOME /
+REM  JDK8_HOME / JDK21_HOME in your shell and nothing below needs editing.
+if "%SDK_HOME%"==""     set "SDK_HOME=E:\Dev_work\Android_Dev\Dev_Tools\Android_SDK\SDK_For_AS352"
+if "%PROJECT_HOME%"=="" set "PROJECT_HOME=E:\Dev_work\Flutter_Dev\marginalia\Marginalia"
+if "%FLUTTER_HOME%"=="" set "FLUTTER_HOME=E:\Dev_work\Android_Dev\Dev_Tools\Flutter_SDK\flutter_windows_3.44.3-stable"
+if "%JDK8_HOME%"==""    set "JDK8_HOME=E:\Dev_work\Java_Dev\JDK_SRC\JDK_1.8"
+if "%JDK21_HOME%"==""   set "JDK21_HOME=E:\Dev_work\Java_Dev\JDK_SRC\JDK_21"
+set "SDK=%SDK_HOME%"
+set "PROJECT=%PROJECT_HOME%"
+set "FLUTTER=%FLUTTER_HOME%"
+set "JDK8=%JDK8_HOME%"
+set "JDK21=%JDK21_HOME%"
 set "ADB=%SDK%\platform-tools\adb.exe"
 set "EMULATOR=%SDK%\emulator\emulator.exe"
 set "AVDMANAGER=%SDK%\tools\bin\avdmanager.bat"

@@ -20,6 +20,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
+    <!-- Taking a photograph for an instruction — "I met a good sentence on a
+         poster". ONE permission, and only for the camera half.
+
+         The GALLERY half deliberately asks for nothing. From Android 13 the
+         system photo picker is the only route and it needs no permission at
+         all; before that, READ_EXTERNAL_STORAGE would have been required — and
+         an app whose entire promise is that it asks for as little as possible
+         does not take storage access to read one screenshot. So there is no
+         READ_MEDIA_IMAGES here and there never will be.
+
+         CAMERA is a runtime permission, so a reader who only ever picks from
+         the gallery is never asked for anything. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+
     <application
         android:label="marginalia"
         android:name="${applicationName}"

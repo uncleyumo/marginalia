@@ -30,6 +30,7 @@ class QueueCard extends StatelessWidget {
     required this.onMenu,
     this.onWrite,
     this.onReroll,
+    this.onPictures,
     this.writing = false,
     this.research = false,
     this.isSample = false,
@@ -40,6 +41,14 @@ class QueueCard extends StatelessWidget {
   final VoidCallback onMenu;
   final VoidCallback? onWrite;
   final VoidCallback? onReroll;
+
+  /// Attach photographs to this card before writing it.
+  ///
+  /// PLANNED CARDS ONLY, like [onWrite] — a picture is an instruction, and an
+  /// instruction describes what is about to be written. On a ready card there is
+  /// nothing left to instruct.
+  final VoidCallback? onPictures;
+
   final bool writing;
 
   /// Whether the writer may look something up before it writes.
@@ -198,6 +207,24 @@ class QueueCard extends StatelessWidget {
                     : 'a different plan · free',
                 onTap: writing ? null : onReroll,
               ),
+              // THE CAMERA. Beside the reroll rather than inside the ⋯ menu,
+              // because the habit it serves is a two-second one: you meet a good
+              // sentence, you photograph it, you want the article. A picture
+              // behind a menu is a picture nobody takes.
+              //
+              // Free, like the reroll, and it says so — attaching a picture is
+              // choosing, and choosing costs nothing. The paid step is still the
+              // Write it button.
+              if (onPictures != null) ...<Widget>[
+                const SizedBox(width: Gap.xs),
+                _FlatBtn(
+                  label: '▣',
+                  tooltip: writing
+                      ? 'a write is in flight'
+                      : 'write it from a picture · free to attach',
+                  onTap: writing ? null : onPictures,
+                ),
+              ],
             ],
           ),
         ],

@@ -12,13 +12,17 @@
 // possible — and that constraint is also good design, because it means the
 // rules can never quietly depend on a widget.
 
+import 'dart:typed_data';
+
 import '../lib/domain/difficulty.dart';
 import '../lib/domain/instruction.dart';
 import '../lib/domain/library.dart';
 import '../lib/domain/models.dart';
+import '../lib/domain/picture.dart';
 import '../lib/domain/plan.dart';
 import '../lib/domain/queue.dart';
 import '../lib/domain/word_pool.dart';
+import '../lib/data/remote/api.dart';
 
 int _failures = 0;
 int _checks = 0;
@@ -605,6 +609,81 @@ void main() {
     check('an edited plan counts as set', edited.fieldsSet > 0);
     check('and differs from the defaults', edited != fresh);
   }
+
+  // ── pictures as an instruction ─────────────────────────────────────────
+  //
+  // The rules that make a picture instruction safe to send, all of them about
+  // what LEAVES the phone. `shrink()` itself needs a real file and a codec, so
+  // it is not checked here — what is checked is the part that can be got wrong
+  // silently: the ceiling, the count, the data URL, and the refusal that has to
+  // happen before the money moves.
+  section('pictures: the ceiling is enforced, and the refusal is early');
+
+  // The ceiling is the whole reason a picture can be sent at all. Five 4 MB
+  // photographs base64'd is a 27 MB body that several providers refuse before
+  // charging anything — so this number is a rule and not a preference.
+  check('a picture is capped at 2 MB', kMaxPictureBytes == 2 * 1024 * 1024);
+  check('and an instruction carries at most five', kMaxPictures == 5);
+  check('the long edge is 1568, the vision convention', kPictureLongEdge == 1568);
+
+  Picture _pic(int bytes) => Picture(
+        bytes: Uint8List(bytes),
+        mediaType: 'image/jpeg',
+        originalBytes: bytes,
+      );
+
+  // Six is refused. Not truncated, not silently dropped — a pack that quietly
+  // held five of six pictures would write an article about the wrong thing and
+  // say nothing about it.
+  bool sixRefused = false;
+  try {
+    PicturePack.of(<Picture>[_pic(1), _pic(1), _pic(1), _pic(1), _pic(1), _pic(1)]);
+  } on StateError {
+    sixRefused = true;
+  }
+  check('a sixth picture is refused, not dropped', sixRefused);
+  check('and five are accepted', PicturePack.of(<Picture>[
+    for (int i = 0; i < 5; i++) _pic(1),
+  ]).length == 5);
+  check('an empty pack is empty', PicturePack.empty().isEmpty);
+
+  // base64 makes a picture 4/3 bigger on the wire, and a price on screen has to
+  // be the price that was charged — so the number the reader is quoted is the
+  // number that goes out.
+  check('the wire size counts the base64 tax',
+      PicturePack.of(<Picture>[_pic(300)]).wireBytes == 400);
+
+  // A picture is data, never a URL. There is no server to hold it and the
+  // reader's photographs are not going to one.
+  check('a picture is sent as a data URL', _pic(4).dataUrl.startsWith(
+        'data:image/jpeg;base64,',
+      ));
+
+  // The resize flag is what the card reads to say "3.8 MB → 480 KB". If it
+  // reported true for a picture that was passed through, the card would claim
+  // to have changed something it did not.
+  check('an untouched picture is not reported as resized',
+      !_pic(900).wasResized);
+  check('and a shrunk one is',
+      Picture(
+        bytes: Uint8List(480),
+        mediaType: 'image/jpeg',
+        originalBytes: 3800,
+      ).wasResized);
+
+  // THE EARLY REFUSAL. A text-only model answers a content array with
+  // `400 unknown variant image_url` having never read the picture — so the
+  // capability has to be asked BEFORE the call, and a write with pictures on a
+  // writer that cannot see them must be impossible.
+  check('DeepSeek is a text model', !WriterEndpoint.deepseek.supportsVision);
+  check('MiMo sees pictures', WriterEndpoint.mimo.supportsVision);
+  check('OpenAI sees pictures', WriterEndpoint.openai.supportsVision);
+  check('and the refusal names an alternative',
+      WriterEndpoint.deepseek.visionRefusal.contains('MiMo'));
+  check('the vision-capable list is not empty',
+      WriterEndpoint.visionCapable.isNotEmpty);
+  check('and does not include the text model',
+      !WriterEndpoint.visionCapable.contains(WriterEndpoint.deepseek));
 
   // ── summary ───────────────────────────────────────────────────────────
   print('');

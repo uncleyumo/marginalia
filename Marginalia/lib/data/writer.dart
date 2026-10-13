@@ -15,6 +15,7 @@ import 'dart:convert';
 
 import '../domain/difficulty.dart';
 import '../domain/models.dart';
+import '../domain/picture.dart';
 import '../domain/plan.dart';
 import 'remote/agent.dart';
 import 'remote/api.dart';
@@ -77,6 +78,60 @@ do:
   a third attempt at the same failing call.
 ''';
 
+  /// Added when the reader attached pictures.
+  ///
+  /// Kept apart from [system] because the fast path must send exactly the prompt
+  /// it has always sent — a reader with no pictures is not told about a feature
+  /// they are not using, and a system prompt that describes pictures to a model
+  /// that was sent none is a model looking for something that is not there.
+  ///
+  /// WHAT IT HASHT TO DO, and it is more than "look at the pictures":
+  ///
+  ///   1. Say what the pictures ARE. The reader does not label them, and the
+  ///      difference between "a sentence I liked" and "a word list I am
+  ///      memorising" is the difference between an article about the sentence's
+  ///      idea and an article that USES those words. So the model is asked to
+  ///      work out which it is looking at.
+  ///   2. Say what to do when there are also words. The two cases the brief
+  ///      calls out — pictures only, and pictures plus a sentence — are handled
+  ///      separately below, because "write about this" and "write about this
+  ///      and also that" are different instructions.
+  ///   3. Refuse to treat a picture as a script. A photograph of a page is not
+  ///      a request to transcribe it. This is the same rule the news tool
+  ///      already follows, for the same reason.
+  static const String pictureRules = '''
+The reader attached photographs to this request. They are above, in order.
+
+WHAT TO DO WITH THEM — in this order:
+
+- Work out what each one IS. They are usually one of three things: a GOOD
+  SENTENCE the reader met somewhere, a SCENE worth writing about, or a WORD
+  LIST they are memorising in another app. Judge from what is actually in the
+  picture, not from what you expected.
+- A sentence: take the IDEA, not the words. Write your own article about what
+  it says. Do not quote it, do not translate it, and do not open with it.
+- A scene: describe what is happening and why it is interesting. The article is
+  ABOUT the thing in the picture.
+- A word list: those words are the vocabulary to USE. Write an article that
+  uses as many of them as will fit naturally, in real sentences — not listed,
+  not defined, not in the order they appear. This is the whole reason the
+  reader photographed a flashcard app.
+
+- If the reader ALSO wrote a sentence, that sentence is the subject and the
+  pictures are the material. Do both: write what they asked for, and draw the
+  vocabulary, the scene or the idea out of the photographs.
+- If the reader wrote NOTHING and attached only pictures, the pictures ARE the
+  subject. Pick the most interesting one and build from there; the others are
+  supporting material.
+- If a picture is unreadable, or is not any of the three things above, ignore
+  it and say nothing about it. A photograph you cannot read is not a reason to
+  write a worse article.
+
+WHAT NEVER TO DO: transcribe text out of a picture into the article. A page of
+somebody else's prose, reproduced in your sentences, is not an article this
+reader paid for. Take the idea or the vocabulary and write something new.
+''';
+
   /// The user's half: the plan, verbatim, plus the shape demanded.
   ///
   /// There is no `marked` argument and there will not be one again. How many
@@ -102,6 +157,7 @@ do:
     List<NewsItem> news = const <NewsItem>[],
     List<String> recentTitles = const <String>[],
     List<String> metWords = const <String>[],
+    List<Picture> pictures = const <Picture>[],
     AgentLoop? agent,
     void Function(AgentResult)? onResult,
   }) async {
@@ -112,6 +168,7 @@ do:
       news: news,
       recentTitles: recentTitles,
       metWords: metWords,
+      pictures: pictures,
     );
 
     final String raw;
@@ -121,18 +178,33 @@ do:
     // because a log label is a label, not a prompt.
     final String subject = instruction.trim();
     final String what = subject.isEmpty
-        ? 'Writing an article (subject left to the writer)'
+        ? (pictures.isEmpty
+            ? 'Writing an article (subject left to the writer)'
+            : 'Writing an article from ${pictures.length} '
+                'picture${pictures.length == 1 ? '' : 's'}')
         : 'Writing an article: ${_oneLine(subject)}';
+
+    // Pictures change the system prompt, so the two paths are separate from here
+    // down. The fast path is byte-for-byte what it has always been.
+    final String prompt =
+        pictures.isEmpty ? system : '$system\n\n$pictureRules';
+
     if (agent == null) {
       raw = await _api.write(
         endpoint: endpoint,
         apiKey: apiKey,
-        system: system,
+        system: prompt,
         user: user,
         what: what,
+        pictures: pictures,
       );
     } else {
-      final AgentResult r = await agent.run(system: system, user: user, what: what);
+      final AgentResult r = await agent.run(
+        system: prompt,
+        user: user,
+        what: what,
+        pictures: pictures,
+      );
       onResult?.call(r);
       raw = r.content;
     }
@@ -158,6 +230,7 @@ do:
     required List<NewsItem> news,
     required List<String> recentTitles,
     required List<String> metWords,
+    required List<Picture> pictures,
   }) {
     final StringBuffer b = StringBuffer();
 
@@ -166,11 +239,38 @@ do:
     b.writeln('Today is ${_todayLine()}.');
     b.writeln();
 
+    // The three cases, in the order they actually occur:
+    //
+    //   words + pictures  — the sentence is the subject, the pictures the
+    //                       material. Both are stated, so the model does not
+    //                       have to guess which one wins.
+    //   pictures only     — there is NO sentence, and saying so out loud is the
+    //                       difference between a model that reads the
+    //                       photographs and one that asks what the subject is.
+    //                       This is the case the brief singles out, and it is
+    //                       the one a naive implementation gets wrong: without
+    //                       this branch the prompt says "NOTHING has been
+    //                       chosen for you, pick the subject yourself" and the
+    //                       model cheerfully ignores the pictures entirely.
+    //   words only        — unchanged, and the ordinary case.
     if (instruction.trim().isNotEmpty) {
       b.writeln('The reader asked for this specifically:');
       b.writeln('«${instruction.trim()}»');
-      b.writeln('Write that. Everything below governs HOW it should read, not '
-          'what it is about.');
+      if (pictures.isNotEmpty) {
+        b.writeln('They also attached ${pictures.length} '
+            'picture${pictures.length == 1 ? '' : 's'}, above. Write what they '
+            'asked for and draw the material out of the photographs.');
+      } else {
+        b.writeln('Write that. Everything below governs HOW it should read, '
+            'not what it is about.');
+      }
+    } else if (pictures.isNotEmpty) {
+      b.writeln('The reader attached ${pictures.length} '
+          'picture${pictures.length == 1 ? '' : 's'} and wrote NOTHING. The '
+          'photographs ARE the request.');
+      b.writeln('Read them, work out what each one is — a sentence they liked, '
+          'a scene, or a word list they are memorising — and build the article '
+          'from the most interesting one.');
     } else {
       b.writeln('NOTHING has been chosen for you. Pick the subject yourself, '
           'and make it something this reader would not have guessed.');

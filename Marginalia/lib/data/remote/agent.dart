@@ -25,6 +25,7 @@ import 'dart:math' as math;
 import 'package:http/http.dart' as http;
 
 import '../../domain/agent_budget.dart';
+import '../../domain/picture.dart';
 import 'api.dart';
 import 'chat.dart';
 import 'log.dart';
@@ -114,10 +115,17 @@ class AgentLoop {
   /// [system] and [user] are the two messages the writer built. The system
   /// message is extended here with the tool policy, because whether tools exist
   /// is this layer's business and not the prompt builder's.
+  ///
+  /// [pictures] go into the FIRST user message and nowhere else, which is the
+  /// whole design: a loop makes several calls, and a loop that re-sent five
+  /// pictures on every turn would send the same kilobytes four times and charge
+  /// for every one of them. The model has seen them once; every later turn is a
+  /// continuation of that same conversation, so they are still in context.
   Future<AgentResult> run({
     required String system,
     required String user,
     required String what,
+    List<Picture> pictures = const <Picture>[],
   }) async {
     _runId = 'r${_now().millisecondsSinceEpoch.toRadixString(36)}';
     _started = _now();
@@ -133,7 +141,10 @@ class AgentLoop {
         'role': 'system',
         'content': tools.isEmpty ? system : '$system\n\n${_toolPolicy()}',
       },
-      <String, Object?>{'role': 'user', 'content': user},
+      <String, Object?>{
+        'role': 'user',
+        'content': userContent(user, pictures),
+      },
     ];
 
     AgentLog.instance.info('plan', 'started', runId: _runId,
@@ -144,6 +155,12 @@ class AgentLoop {
           'tools': <String>[for (final AgentTool t in tools) t.name],
           'system': system.length,
           'user': user.length,
+          if (pictures.isNotEmpty)
+            'pictures': <String, Object?>{
+              'count': pictures.length,
+              'bytes': pictures.fold<int>(
+                  0, (int s, Picture p) => s + p.bytes.lengthInBytes),
+            },
         });
 
     try {

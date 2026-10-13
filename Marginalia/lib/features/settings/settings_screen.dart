@@ -378,6 +378,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     final String writerLine = m.writerKeySaved
         ? '${m.writer.name} · a key is saved · ${m.writer.costLine}'
+            '${m.writer.supportsVision ? ' · sees pictures' : ''}'
         : 'no key · the app works fully without one';
 
     final String dictLine = m.dictionaryEntries == 0
@@ -1209,7 +1210,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         for (final WriterEndpoint e in WriterEndpoint.all) ...<Widget>[
           _Choice(
             title: e.name,
-            sub: e.costLine,
+            // Vision is stated on the row, not discovered by failing. A reader
+            // who wants to write an article from a photograph of a word list
+            // needs to know WHICH endpoint takes one before they take the
+            // picture — and a toast that says "unsupported" after they have
+            // chosen is a toast that arrives too late to help.
+            sub: e.supportsVision
+                ? '${e.costLine} · sees pictures'
+                : '${e.costLine} · text only',
             selected: e.id == m.writerId,
             onTap: () => widget.onWriterSelected(e.id),
           ),

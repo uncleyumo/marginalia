@@ -3,7 +3,7 @@ description: "No-Stop English — 三篇文章永远在等你。离线优先的�
 publish_to: "none"
 
 # The version is deliberately not a release train. Design v9 §4e.
-version: 0.4.0+7
+version: 0.4.0+8
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -82,6 +82,20 @@ dependencies:
   # that goes stale the moment somebody forgets, and it would be wrong in the
   # one situation it exists for.
   package_info_plus: ^8.1.0
+
+  # ── pictures as an instruction ──────────────────────────────────────────
+  # The reader photographs a good sentence, a scene, or a word list they are
+  # memorising in another app, and those pictures are what the article is
+  # written about. Two packages, and the split is the whole design:
+  #
+  #   image_picker — GETTING the picture. Gallery and camera, up to five.
+  #   image       — MAKING IT SMALLER. A 12 MP photo is 4 MB, and five of those
+  #                 base64'd into one request body is a body several providers
+  #                 refuse before they charge anything.
+  #
+  # Neither is a service and neither touches the network on its own.
+  image_picker: ^1.2.4
+  image: ^4.12.0
 
 dev_dependencies:
   flutter_test:

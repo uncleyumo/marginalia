@@ -41,6 +41,7 @@ local to them (which pane is open, whether a sheet's star is on).
 | `difficulty.dart` | `Difficulty`, the two coverage lines, `markCapFor` |
 | `word_pool.dart` | `WordPool`, the decay curve, `selectionChance` |
 | `library.dart` | `shelf()`, `ShelfRow`, `Library.search`, `mostRevisited` |
+| `picture.dart` | `Picture`, `PicturePack` — the 2 MB ceiling and the 5-picture cap |
 
 The five invariants live in these types, not in comments:
 
@@ -145,6 +146,47 @@ Two Dart facts shape the code more than anything else:
 - **`reasoning_content` must be stripped before an assistant turn is sent back.**
   MiMo and DeepSeek reject their own reasoning being echoed. The strip happens
   in exactly one function, `ChatTurn.assistantMessage()`.
+
+### Pictures as an instruction
+
+A photograph of a good sentence, a scene, or a word list from another app is an
+instruction, and the pipeline has one rule about it: **a picture is made small
+before anything is spent.**
+
+```
+image_picker ──▶ data/shrink.dart ──▶ domain/picture.dart ──▶ writer ──▶ api
+   the file        decode + scale        the ceiling,        prompt    content
+                   to 1568px             stated once         tells it   array
+                   + JPEG walk                        what it is
+```
+
+Four decisions worth knowing before changing any of it:
+
+- **The ceiling is 2 MB and the cap is 5 pictures** (`domain/picture.dart`). A
+  12 MP photo is ~4 MB, and five of those base64'd is a 27 MB request body that
+  several providers refuse *before charging anything*. Both numbers are checked
+  as executable invariants, not trusted.
+- **A file already under the ceiling is passed through untouched.** Re-encoding a
+  200 KB screenshot to save nothing is work that makes the picture worse and
+  saves nothing.
+- **Vision is a per-endpoint fact, not an assumption.** `deepseek-chat` answers
+  `400 unknown variant image_url` for a content array, having never read the
+  picture. So `WriterEndpoint.supportsVision` gates the write *before the call*,
+  and the refusal sentence names the endpoints that would have taken it.
+- **Pictures go into the FIRST user message only.** A loop makes several calls;
+  re-sending five photographs on every turn would send the same kilobytes four
+  times and charge for each one.
+
+**Nothing is stored.** There is no picture table, no gallery, nothing that
+outlives the write — the reader already has these in their photo app. The one
+thing written to the queue row is the intent (`from a word list`), because a card
+that still says `Anything` while five photographs were attached to it is a card
+lying about its own state.
+
+The prompt split matters and is easy to get wrong: `ArticleWriter.system` stays
+byte-identical for the no-picture path, and `pictureRules` is appended only when
+there are pictures. A system prompt describing photographs to a model that was
+sent none is a model looking for something that is not there.
 
 ### Schema migrations, and the trap in them
 

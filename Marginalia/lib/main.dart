@@ -39,6 +39,7 @@ import 'data/writer.dart';
 import 'domain/instruction.dart';
 import 'domain/library.dart';
 import 'domain/models.dart';
+import 'domain/picture.dart';
 import 'domain/plan.dart';
 import 'domain/queue.dart';
 import 'domain/word_pool.dart';
@@ -47,6 +48,7 @@ import 'features/article/listen_screen.dart';
 import 'features/article/word_sheet.dart';
 import 'features/history/history_screen.dart';
 import 'features/library/library_screen.dart';
+import 'features/queue/picture_sheet.dart';
 import 'features/queue/queue_card.dart';
 import 'features/queue/regenerate_sheet.dart';
 import 'features/settings/debug_log_screen.dart';
@@ -1066,9 +1068,22 @@ class _ShellState extends State<_Shell> {
         const Eyebrow('Queue · 3 waiting'),
         Text('Three waiting', style: context.texts.titleLarge),
         const SizedBox(height: 4),
+        // HONEST ABOUT WHAT HAPPENS WHEN YOU FINISH ONE.
+        //
+        // This line used to promise "the next is written at once", which the
+        // code has never done and cannot do: there is no timer, no background
+        // task and no write anywhere but a tap, and `mayAutoWrite` guards a path
+        // that does not exist. A reader who read three articles, watched nothing
+        // change, and had been told the next one arrives "at once" has been lied
+        // to by the one screen that promises nothing else.
+        //
+        // So it now says what actually happens, and it says the good half too:
+        // reading never takes anything away, and the next write still costs
+        // exactly what the card says and not a cent more.
         Text(
-          'Finish one and the next is written at once. Read in any order, or '
-          'just listen.',
+          'Read in any order, or just listen. What you have read stays where it '
+          'is — the only thing that costs money is Write it, and nothing is '
+          'spent until you tap it.',
           style: TextStyle(
             fontFamily: TypeScale.serif,
             fontSize: 13,
@@ -1087,6 +1102,12 @@ class _ShellState extends State<_Shell> {
             onMenu: () => _slotMenu(context, q, i),
             onWrite: () => _write(q, i),
             onReroll: () => _reroll(q, i),
+            // The camera, on the planned card only. See `_withPictures` for why
+            // it is wired on the CARD and not in the ⋯ menu: this is a
+            // two-second habit and a menu is not where two-second habits live.
+            onPictures: q.slots[i].isPlanned && !q.slots[i].isWriting
+                ? () => _withPictures(q, i)
+                : null,
             // Read off the LIVE slot, not the hydrated copy. `_hydrated` returns
             // a value object for rendering; the flag that says a call is in
             // flight belongs to the slot the call is writing into.
@@ -1523,7 +1544,16 @@ class _ShellState extends State<_Shell> {
   final Map<String, Article> _written = <String, Article>{};
 
   /// THE ONLY PATH THAT COSTS MONEY, and it is a tap.
-  Future<void> _write(Queue q, int index) async {
+  /// The write. THE ONLY PLACE MONEY LEAVES THE PHONE.
+  ///
+  /// [pictures] is the reader's photographs, already shrunk. It defaults to
+  /// empty because most writes have none — a card tapped with nothing attached
+  /// must behave exactly as it always has.
+  Future<void> _write(
+    Queue q,
+    int index, {
+    List<Picture> pictures = const <Picture>[],
+  }) async {
     QueueSlot slot = q.slots[index];
     if (!slot.isPlanned) {
       Toast.show(context, 'that one is already written');
@@ -1559,6 +1589,21 @@ class _ShellState extends State<_Shell> {
     }
 
     final WriterEndpoint ep = WriterEndpoint.byId(_writerId);
+
+    // THE PICTURE GATE, and it is before the key check is spent rather than
+    // after — a text-only model answers a content array with
+    // `400 unknown variant image_url`, having never read the picture and having
+    // charged nothing. Sending it anyway would be paying for a request that
+    // could not have worked, which is the one failure this app refuses to have.
+    //
+    // The refusal is a SENTENCE that names the alternatives, because a reader
+    // holding a photograph of a word list and a toast that says "unsupported"
+    // has been left with nowhere to go.
+    if (pictures.isNotEmpty && !ep.supportsVision) {
+      Toast.show(context, ep.visionRefusal, duration: const Duration(seconds: 6));
+      return;
+    }
+
     // The card shows it is working, so a tap cannot become a second call while
     // the first is still in flight.
     q.slots[index].isWriting = true;
@@ -1608,6 +1653,7 @@ class _ShellState extends State<_Shell> {
         news: news,
         recentTitles: recent,
         metWords: met,
+        pictures: pictures,
         agent: agent,
         onResult: (AgentResult r) => ran = r,
       );
@@ -1790,6 +1836,78 @@ class _ShellState extends State<_Shell> {
     _repo.saveQueue(q);
     setState(() {});
     Toast.show(context, 'a different plan · nothing was paid for');
+  }
+
+  // ── pictures as an instruction ──────────────────────────────────────────
+
+  /// The camera on a planned card. Two taps: attach, then write.
+  ///
+  /// WHY THIS IS NOT ONE TAP. The pictures have to be shrunk before anything is
+  /// spent — a 12 MP photo is 4 MB and five of those base64'd is a request body
+  /// several providers refuse outright — and shrinking takes a few hundred
+  /// milliseconds of full-resolution decoding that must not happen while a paid
+  /// call is in flight. So the sheet is where the reader sees the pictures, sees
+  /// them get smaller, and confirms; the write is the next tap.
+  ///
+  /// WHY THE INTENT IS ASKED. "A good sentence", "a scene" and "a word list"
+  /// produce three different articles from the same photograph, and only the
+  /// reader knows which one they photographed. A model that has to guess will
+  /// guess, and the reader pays for the guess. One chip is cheaper than an
+  /// article about the wrong thing.
+  Future<void> _withPictures(Queue q, int index) async {
+    final QueueSlot slot = q.slots[index];
+    if (!slot.isPlanned || slot.isWriting) return;
+
+    final PictureRequest? req = await AppSheet.show<PictureRequest>(
+      context,
+      builder: (BuildContext ctx) => PictureSheet(
+        // Whatever the card already says it is for. Not remembered across
+        // launches — a picture instruction lives for one write, and so does the
+        // answer to this question.
+        intent: slot.instruction.trim().isEmpty
+            ? null
+            : _intentOf(slot.instruction),
+        // The writer's ability is checked HERE rather than after the pictures
+        // are picked, so a reader on a text-only model is told before they have
+        // gone to their gallery and back.
+        canSeePictures: WriterEndpoint.byId(_writerId).supportsVision,
+      ),
+    );
+    if (req == null || req.isEmpty || !mounted) return;
+
+    // The intent is written onto the card, and this is the ONLY thing that is
+    // saved. The PICTURES are not — there is no table of blobs and nothing here
+    // outlives the write; the reader already has them in their photo app. What
+    // survives is the sentence saying what they were for, because a card that
+    // says `Anything` while five photographs were attached to it is a card
+    // lying about its own state.
+    //
+    // A reader who typed something keeps it: their words outrank the intent,
+    // and the intent is told to the model through the pictures themselves.
+    if (slot.instruction.trim().isEmpty) {
+      q.editPlan(index, instruction: 'from ${req.intent.short}');
+      await _repo.saveQueue(q);
+      if (!mounted) return;
+      setState(() {});
+    }
+
+    await _write(q, index, pictures: req.pictures);
+  }
+
+  /// Which intent a stored instruction describes, if any.
+  ///
+  /// Written by [_withPictures] as `from a sentence` / `from a scene` /
+  /// `from a word list`, and read back so the sheet opens with the answer
+  /// already chosen. Matching on the string rather than a new column: a picture
+  /// instruction is a sentence like any other, and adding a field to the queue
+  /// table for a value that is already spelled out in the row would be the
+  /// second copy of the truth this project refuses to keep.
+  static PictureIntent? _intentOf(String instruction) {
+    final String s = instruction.trim().toLowerCase();
+    for (final PictureIntent i in PictureIntent.values) {
+      if (s == 'from ${i.short}') return i;
+    }
+    return null;
   }
 
   // ── article ───────────────────────────────────────────────────────────

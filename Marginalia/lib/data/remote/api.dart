@@ -17,6 +17,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../../domain/picture.dart';
 import 'log.dart';
 
 /// A failure a reader can be told about in one sentence.
@@ -59,6 +60,7 @@ class WriterEndpoint {
     required this.baseUrl,
     required this.model,
     required this.costLine,
+    this.supportsVision = false,
   });
 
   final String id;
@@ -70,12 +72,42 @@ class WriterEndpoint {
   /// call is an invoice, not a price.
   final String costLine;
 
+  /// Whether this model can be sent a picture.
+  ///
+  /// A FIELD AND NOT A GUESS, because the three providers do not agree and the
+  /// disagreement arrives as a 400 rather than a warning: DeepSeek's chat
+  /// endpoint rejects a message whose `content` is an array with
+  /// `unknown variant image_url`, having never looked at the picture at all. An
+  /// app that assumed vision would charge the reader for a request that could
+  /// not have worked.
+  ///
+  /// So it is stated per endpoint, and a write with pictures on an endpoint that
+  /// cannot see them is REFUSED BEFORE THE CALL — see [visionRefusal]. Nothing
+  /// is spent, and the reader is told which endpoints would have taken them.
+  final bool supportsVision;
+
+  /// The sentence shown when a reader attaches a picture to a writer that
+  /// cannot see it. Names the alternatives, because "not supported" on its own
+  /// leaves the reader holding a photograph with nowhere to put it.
+  String get visionRefusal => 'This writer cannot see pictures. Switch to '
+      '${visionCapable.map((WriterEndpoint e) => e.name).join(' or ')} in '
+      'Settings, or write it without them. Nothing was spent.';
+
+  /// Every endpoint that can take a picture.
+  static List<WriterEndpoint> get visionCapable => <WriterEndpoint>[
+        for (final WriterEndpoint e in all)
+          if (e.supportsVision) e,
+      ];
+
   static const WriterEndpoint deepseek = WriterEndpoint(
     id: 'deepseek',
     name: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1',
     model: 'deepseek-chat',
     costLine: 'deepseek-chat · cheapest · ~\$0.002 an article',
+    // VERIFIED AGAINST THE PROVIDER: `deepseek-chat` answers 400
+    // "unknown variant image_url" for a content array. It is a text model.
+    supportsVision: false,
   );
 
   static const WriterEndpoint openai = WriterEndpoint(
@@ -84,17 +116,23 @@ class WriterEndpoint {
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
     costLine: 'gpt-4o-mini · ~\$0.01 an article',
+    supportsVision: true,
   );
 
   // `mimo-v2.5` is withdrawn on 2026-10-21, and a withdrawn model id is a 404
   // rather than a warning. v2.6-flash is the current replacement on the same
   // endpoint and the same request shape; nothing else here changes.
+  //
+  // V2.6-Flash is a FULL-MODALITY model — text, image, video and audio in — so
+  // this is the endpoint that takes a picture at the price the card already
+  // promises. It is the default answer to "I photographed something".
   static const WriterEndpoint mimo = WriterEndpoint(
     id: 'mimo',
     name: 'Xiaomi MiMo',
     baseUrl: 'https://api.xiaomimimo.com/v1',
     model: 'mimo-v2.6-flash',
     costLine: 'mimo-v2.6-flash · ~\$0.001 an article',
+    supportsVision: true,
   );
 
   static const List<WriterEndpoint> all = <WriterEndpoint>[
@@ -194,6 +232,38 @@ const String kNarratorInstruction =
     'clear consonants, unhurried pace, natural phrasing and sentence rhythm. '
     'Even and steady, like a documentary reader rather than a radio advert.';
 
+/// Build the user message's `content`.
+///
+/// A string when there are no pictures — the shape every provider accepts, and
+/// the shape this app has always sent. An ARRAY of parts when there are, which
+/// is the OpenAI multimodal convention all three of these endpoints share:
+/// the text first so the model reads the instruction before it looks, then one
+/// `image_url` part per picture.
+///
+/// The order is not cosmetic. A model that meets a photograph with no idea what
+/// it is for describes it; a model that has just been told "these are the
+/// pictures you asked about" reads them AS the instruction. Same bytes, same
+/// price, materially different article.
+///
+/// `detail` is pinned to `high` rather than left to the provider's default,
+/// because the default for gpt-4o-mini is `auto` and auto has been observed to
+/// downscale a word-list screenshot until the words are unreadable — the one
+/// thing these pictures are usually full of.
+Object? userContent(String user, List<Picture> pictures) {
+  if (pictures.isEmpty) return user;
+  return <Object?>[
+    <String, Object?>{'type': 'text', 'text': user},
+    for (final Picture p in pictures)
+      <String, Object?>{
+        'type': 'image_url',
+        'image_url': <String, Object?>{
+          'url': p.dataUrl,
+          'detail': 'high',
+        },
+      },
+  ];
+}
+
 /// The HTTP client. Thin on purpose: an interceptor stack would be machinery
 /// without a job when there are two request shapes.
 class RemoteApi {
@@ -217,12 +287,18 @@ class RemoteApi {
   /// which turned a plan rewrite that timed out into "The provider is having a
   /// bad minute (write an article)" — a sentence that describes something the
   /// reader did not ask for.
+  ///
+  /// [pictures] rides along in the user message. When there are none — the
+  /// ordinary case, and every plan rewrite — the message is a plain string
+  /// exactly as it has always been, so the fast path sends the same bytes it
+  /// sent before this parameter existed.
   Future<String> write({
     required WriterEndpoint endpoint,
     required String apiKey,
     required String system,
     required String user,
     String what = 'write an article',
+    List<Picture> pictures = const <Picture>[],
   }) async {
     // A run id, even on the one-call path. Without it a plan rewrite left a
     // single orphan line ("could not reach") with nothing to say what it was
@@ -234,6 +310,12 @@ class RemoteApi {
       'what': what,
       'endpoint': endpoint.id,
       'model': endpoint.model,
+      if (pictures.isNotEmpty)
+        'pictures': <String, Object?>{
+          'count': pictures.length,
+          'bytes': pictures.fold<int>(
+              0, (int s, Picture p) => s + p.bytes.lengthInBytes),
+        },
     });
     final DateTime t0 = DateTime.now();
     try {
@@ -242,9 +324,9 @@ class RemoteApi {
         apiKey: apiKey,
         body: <String, Object?>{
           'model': endpoint.model,
-          'messages': <Map<String, String>>[
-            <String, String>{'role': 'system', 'content': system},
-            <String, String>{'role': 'user', 'content': user},
+          'messages': <Map<String, Object?>>[
+            <String, Object?>{'role': 'system', 'content': system},
+            <String, Object?>{'role': 'user', 'content': userContent(user, pictures)},
           ],
           'temperature': 0.4,
           'response_format': <String, Object?>{'type': 'json_object'},

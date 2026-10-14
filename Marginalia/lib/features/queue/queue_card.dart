@@ -31,6 +31,8 @@ class QueueCard extends StatelessWidget {
     this.onWrite,
     this.onReroll,
     this.onPictures,
+    this.reads = 0,
+    this.listens = 0,
     this.writing = false,
     this.research = false,
     this.isSample = false,
@@ -48,6 +50,24 @@ class QueueCard extends StatelessWidget {
   /// instruction describes what is about to be written. On a ready card there is
   /// nothing left to instruct.
   final VoidCallback? onPictures;
+
+  /// How many times this article has been read through, in all.
+  ///
+  /// ON THE CARD, AND NOT ONLY IN HISTORY. Before this, a ready card rendered
+  /// exactly the same whether it had been read five times or never — there is no
+  /// `finished` state in the model, so nothing in the queue could tell the two
+  /// apart — and a reader who had just finished an article met a card that read
+  /// as fresh, with `Done with it` in its menu as though it were. The prototype
+  /// had this line (`read 3× · heard 5×`); the port dropped it.
+  ///
+  /// Zero is the normal case for a new article and is not shown at all: a card
+  /// that says `read 0× · heard 0×` is a card stating a fact about itself that
+  /// nobody asked for.
+  final int reads;
+
+  /// How many times it has been heard, in all. Independent of [reads] — hearing
+  /// is not reading, and the two numbers are never added together here.
+  final int listens;
 
   final bool writing;
 
@@ -328,6 +348,34 @@ class QueueCard extends StatelessWidget {
                 color: c.ink3,
               ),
             ),
+
+            // WHAT THE READER HAS ALREADY DONE WITH IT.
+            //
+            // The line that answers "why does a card I finished still offer
+            // Done with it?" — it does, and now the card says why that is a
+            // reasonable question to ask about it: `read 2× · heard 1×`. Before
+            // this line existed, a finished article and a brand-new one rendered
+            // identically, because the model has no finished state and the card
+            // showed no counter. The prototype carried these two flags on every
+            // ready card.
+            //
+            // Hidden when both are zero. `read 0× · heard 0×` states a fact about
+            // a new article that nobody asked about, and the meta line above
+            // already says everything that matters about an unread one.
+            if (reads > 0 || listens > 0) ...<Widget>[
+              const SizedBox(height: 3),
+              Text(
+                <String>[
+                  if (reads > 0) 'read ${times(reads)}',
+                  if (listens > 0) 'heard ${times(listens)}',
+                ].join(' · '),
+                style: TextStyle(
+                  fontFamily: TypeScale.mono,
+                  fontSize: 10.5,
+                  color: c.ink3,
+                ),
+              ),
+            ],
             const SizedBox(height: 11),
             // A `ready` card whose text is not on this phone gets no Read button.
             //

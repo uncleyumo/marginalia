@@ -134,6 +134,113 @@ void main() {
   check('writing a ready slot is refused',
       cost.writeSlot(0, _article('a1')) == null);
 
+  // ── single flight, and where the lock lives ──────────────────────────
+  //
+  // Two bugs this section exists to stop coming back, both found while adding
+  // the automatic write:
+  //
+  //  1. The lock was claimed AFTER two awaits, so two callers entering that
+  //     window both read "not writing" and both paid. A check separated from
+  //     its claim by an `await` is not a check.
+  //  2. The lock was the slot's own `isWriting` flag, which is persisted. Any
+  //     other action's `saveQueue` — Done with it on another card, a reroll, an
+  //     edit — wrote a mid-flight `true` to the disk, and a process that died
+  //     restored it: a card reading "Writing…" forever, with Write it, ↻, ▣ and
+  //     Change it all dead, escape only by clearing the app's data.
+  section('2b. single flight is a lock, and it does not survive a restart');
+
+  // `isWriting` is a transient and the queue must be able to see it as one.
+  final Queue lockQ = _queueWithTwoReadyOnePlanned();
+  lockQ.slots[2].isWriting = true;
+  check('a slot can be marked as writing', lockQ.slots[2].isWriting);
+  check('and isWritingAnywhere sees it', lockQ.isWritingAnywhere);
+  check('while another slot is not', !lockQ.slots[0].isWriting);
+
+  // Every mutation that installs a NEW slot must reset the transient. A plan
+  // replacing a slot that was mid-flight inherits nothing — the write that was
+  // in flight belongs to the article that was just retired.
+  final Queue resetQ = Queue(<QueueSlot>[
+    _ready('a1'),
+    _ready('a2'),
+    QueueSlot(
+      articleId: 'a3',
+      state: SlotState.planned,
+      plannedWords: 300,
+      plannedBand: LengthBand.medium,
+      isWriting: true,
+    ),
+  ]);
+  final Article? fromWriting = resetQ.retireReadySlot(0, _planned('p'));
+  check('a retired slot\'s write is retired with it', fromWriting != null);
+  check('and the replacement is not left writing',
+      !resetQ.slots[0].isWriting,
+      'the new plan inherited a flag that was never about it');
+
+  // reroll installs a brand-new slot, so it cannot inherit the flag either.
+  final Queue rerollQ = Queue(<QueueSlot>[
+    QueueSlot(
+      articleId: 'r1',
+      state: SlotState.planned,
+      plannedWords: 300,
+      plannedBand: LengthBand.medium,
+      isWriting: true,
+    ),
+    _ready('a2'),
+    _ready('a3'),
+  ]);
+  rerollQ.reroll(0, _planned('fresh'));
+  check('a rerolled slot is not left writing', !rerollQ.slots[0].isWriting);
+
+  // editPlan rewrites the slot, and it must carry the flag FORWARD — a plan
+  // being edited is still the plan being written. This is the one mutation
+  // where keeping it is correct, which is why it is checked explicitly.
+  final Queue editQ = Queue(<QueueSlot>[
+    QueueSlot(
+      articleId: 'e1',
+      state: SlotState.planned,
+      plannedWords: 300,
+      plannedBand: LengthBand.medium,
+      isWriting: true,
+    ),
+    _ready('a2'),
+    _ready('a3'),
+  ]);
+  editQ.editPlan(0, words: 500);
+  check('an edited plan keeps its write in flight', editQ.slots[0].isWriting);
+
+  // writeSlot clears it: the article arrived, so there is nothing in flight.
+  final Queue doneQ = Queue(<QueueSlot>[
+    QueueSlot(
+      articleId: 'w1',
+      state: SlotState.planned,
+      plannedWords: 300,
+      plannedBand: LengthBand.medium,
+      isWriting: true,
+    ),
+    _ready('a2'),
+    _ready('a3'),
+  ]);
+  doneQ.writeSlot(0, _article('w1'));
+  check('a finished write clears the flag', !doneQ.slots[0].isWriting);
+  check('and the slot is ready', doneQ.slots[0].isReady);
+
+  // The queue can tell an automatic write what to write, and there is exactly
+  // one answer to that question at a time — not "whichever".
+  final Queue pickQ = _queueWithTwoReadyOnePlanned();
+  check('the next automatic write is the first planned slot',
+      pickQ.nextPlannedIndex == 2, 'got ${pickQ.nextPlannedIndex}');
+  check('and it is a slot, not a guess', pickQ.nextPlanned?.articleId == 'a3');
+  final Queue noPlan = Queue(<QueueSlot>[_ready('a1'), _ready('a2'), _ready('a3')]);
+  check('with no plan there is nothing to write', noPlan.nextPlannedIndex == -1);
+  check('and nextPlanned is null rather than a wrong slot',
+      noPlan.nextPlanned == null);
+
+  // the automatic write is blocked while any plan waits, and only then.
+  // `noPlan` holds three articles and no plan, which is the one state where
+  // the app may write by itself — this is the gate that made that possible.
+  check('a queue with no plan allows automatic writing', noPlan.mayAutoWrite);
+  check('and a queue with a plan waiting does not', !pickQ.mayAutoWrite);
+
   // with no planned slot, writing works. It has to be a PLANNED slot being
   // written — writing an already-ready card is not a thing that can happen.
   final Queue open = Queue(<QueueSlot>[

@@ -104,6 +104,10 @@ class Queue {
 
   int get length => _slots.length;
 
+  bool get isEmpty => _slots.isEmpty;
+
+  bool get isNotEmpty => _slots.isNotEmpty;
+
   /// Invariant 1. Checked on every mutation rather than only in tests: the
   /// cheapest place to catch a violated invariant is the line that broke it.
   void _assertSize() {
@@ -115,7 +119,43 @@ class Queue {
 
   int get plannedCount => _slots.where((QueueSlot s) => s.isPlanned).length;
 
+  int get readyCount => _slots.where((QueueSlot s) => s.isReady).length;
+
   bool get hasPlannedSlot => plannedCount > 0;
+
+  /// Whether ANY slot has a write in flight.
+  ///
+  /// SINGLE FLIGHT, and it is a property of the QUEUE rather than of a slot.
+  /// The per-slot `isWriting` guard stops a second tap on the SAME card, which
+  /// was enough when every write began with a tap on that card. It stops being
+  /// enough the moment a write can begin somewhere else: two writes in the air
+  /// is two charges for two articles, and the reader agreed to one.
+  ///
+  /// Everything that starts a write asks this first. A manual write says so out
+  /// loud, because the reader is standing there and a silent refusal reads as a
+  /// dead button.
+  bool get isWritingAnywhere => _slots.any((QueueSlot s) => s.isWriting);
+
+  /// The first planned slot, or null. What an automatic write picks.
+  ///
+  /// FIRST, and not "the least recently used" or anything cleverer: the queue is
+  /// not ordered, and a rule a reader can predict ("the top one that is not
+  /// written yet") is worth more than a rule that picks slightly better. The
+  /// reader can always reroll or edit a card to change what gets written next.
+  QueueSlot? get nextPlanned {
+    for (final QueueSlot s in _slots) {
+      if (s.isPlanned) return s;
+    }
+    return null;
+  }
+
+  /// The index of the first planned slot, or -1. [nextPlanned]'s address.
+  int get nextPlannedIndex {
+    for (int i = 0; i < _slots.length; i++) {
+      if (_slots[i].isPlanned) return i;
+    }
+    return -1;
+  }
 
   /// THE COST CEILING, and it is narrower than it first looks.
   ///

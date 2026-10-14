@@ -47,9 +47,19 @@ The five invariants live in these types, not in comments:
 
 1. The queue is exactly three slots.
 2. A slot is `planned` or `ready`. There is no third state and no `finished`.
-3. Any slot being `planned` stops all automatic writing.
+3. A slot being `planned` stops automatic writing, and nothing stops a tap.
+   `mayAutoWrite` gates code that would spend without a tap; `writeSlot` is
+   reachable only by one.
 4. Reading counts and never removes. `listens` never touches `reads`.
 5. Freeing space changes `kb` and nothing else — counts survive deletion.
+
+Invariant 3 is the one that changed when the app learned to write by itself,
+and it changed in a way worth stating precisely: it now reads "stops
+**automatic** writing". A reader who taps `Write it` on a planned card gets an
+article — an app that refused the only tap it has would be an app that can
+never spend a cent, which is not what "a deliberate, affordable action" means.
+The two halves are kept apart in the code so that neither can quietly become
+the other.
 
 `tool/check_invariants.dart` runs these as a program. It is a program and not a
 `test/` file on purpose: `dart test` cannot start on this machine (native-asset
@@ -250,6 +260,36 @@ hiding it behind a container would make the invariants harder to see, not easier
 a pre-constructed `Widget` instance means Flutter's `canUpdate` sees the same
 widget and skips the rebuild, which is exactly how a settings pane silently
 stops refreshing.
+
+### Single flight, and why the lock is not on the slot
+
+`_write` is the only place money leaves the phone, so exactly one may be in
+flight. That rule was first written as `if (slot.isWriting) return` on the card
+being written, which was correct for as long as every write began with a tap on
+that card. The automatic write broke it twice over, in two different ways:
+
+**The check and the claim must be one expression.** The guard used to sit at the
+top of `_write`, and `isWriting = true` was set after the key was read — two
+`await`s later. Two callers entering that window both read `false`, both walked
+on, and both reached the paid call: two charges, and the second article
+overwrote the first. A check separated from its claim by an `await` is not a
+check. The lock is now `_writeClaim`, claimed in `!_claimWrite()` with nothing
+between the test and the set.
+
+**The lock must not be persisted.** It used to be `QueueSlot.isWriting`, and
+`_persistSlots` wrote that flag verbatim. Every other action calls `saveQueue` —
+`Done with it` on another card, a reroll, an edit — so any of them landing
+mid-flight wrote a `true` that was no longer true. A process that died right
+after restored it in `loadQueue`, and the card read "Writing…" forever with
+`Write it`, `↻`, `▣` and `Change it` all dead; the only escape was clearing the
+app's data. `saveQueue` now always writes `false` and `loadQueue` always reads
+`false`. A queue off the disk has no write in flight, because a write in flight
+belongs to a process and the process reading it is not that process.
+
+So the flag on the slot is a *picture* of the lock — what the card renders — and
+`_writeClaim` is the lock. Every exit from `_write` releases it: success, no key,
+a text-only model refusing pictures, a provider refusal, a storage failure, and
+an unmounted shell. `_releaseWrite` is idempotent because the exits are many.
 
 ## Design tokens
 

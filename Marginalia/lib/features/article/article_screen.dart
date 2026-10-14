@@ -411,22 +411,13 @@ class _ArticleScreenState extends State<ArticleScreen> {
       // Not counted today. The history still matters: an article the reader has
       // been through four times should not greet them as a stranger.
       if (widget.readsInAll == 0) return 'finished reading?';
-      return 'finished reading? · read ${_times(widget.readsInAll)} before, '
+      return 'finished reading? · read ${times(widget.readsInAll)} before, '
           'not today';
     }
     if (widget.readsInAll <= 1) return 'counted · the first read';
-    return 'counted ${_times(widget.readsToday)} today · '
+    return 'counted ${times(widget.readsToday)} today · '
         '${widget.readsInAll} in all';
   }
-
-  /// `once` / `twice` / `4 times`. Words for the small numbers, because the line
-  /// is read as a sentence and `1 times` is the kind of thing that makes a
-  /// reader stop trusting the rest of the interface.
-  static String _times(int n) => switch (n) {
-        1 => 'once',
-        2 => 'twice',
-        _ => '$n times',
-      };
 
   /// The only button on this screen. It counts; it does not finish.
   ///

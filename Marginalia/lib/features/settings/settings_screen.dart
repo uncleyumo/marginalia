@@ -68,6 +68,9 @@ class SettingsModel {
     required this.newsOn,
     required this.searchKeySaved,
     required this.searchOn,
+    required this.autoWrite,
+    required this.autoWriteUsed,
+    required this.autoWriteCeiling,
     required this.version,
     required this.build,
   });
@@ -114,6 +117,18 @@ class SettingsModel {
   final bool newsOn;
   final bool searchKeySaved;
   final bool searchOn;
+
+  /// Whether the app writes the next article by itself, and how far into this
+  /// month's allowance it is.
+  ///
+  /// Three fields rather than one, because the reader has three different
+  /// questions: is it on (a switch), has it been spending (a number), and what
+  /// happens when it stops (a ceiling). A single "automatic writing: on" row
+  /// answers the first and hides the other two, and the other two are the ones
+  /// about money.
+  final bool autoWrite;
+  final int autoWriteUsed;
+  final int autoWriteCeiling;
 
   /// What Android says is installed: `versionName` and `versionCode`.
   ///
@@ -185,6 +200,7 @@ class SettingsScreen extends StatefulWidget {
     required this.onSearchKeyChanged,
     required this.onSearchToggled,
     required this.onTestSearch,
+    required this.onAutoWriteChanged,
     required this.onOpenDebugLog,
   });
 
@@ -253,6 +269,12 @@ class SettingsScreen extends StatefulWidget {
   final void Function(String key) onSearchKeyChanged;
   final ValueChanged<bool> onSearchToggled;
   final Future<String?> Function() onTestSearch;
+
+  /// Turns the automatic write on or off. Null never happens — unlike the two
+  /// optional sources, this needs no key to be meaningful, so the switch is
+  /// always live. (What it does still needs a key; with none saved, nothing is
+  /// spent and nothing is written, and the planned cards say so.)
+  final ValueChanged<bool> onAutoWriteChanged;
 
   /// Opens the debug log. A callback rather than a push from here, so this
   /// screen stays a screen and not a navigator.
@@ -1223,6 +1245,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 8),
         ],
+
+        // ── the automatic write ──────────────────────────────────────────
+        //
+        // It sits in THIS pane rather than in one of its own, because it is the
+        // same decision as the writer itself: who writes, and how much of it
+        // happens without being asked. A reader who came here to change writer
+        // is a reader who is thinking about exactly this.
+        const SectionLabel('Writing itself'),
+        _SwitchRow(
+          label: 'Write the next one automatically',
+          sub: 'When you finish an article, the planned card starts writing. '
+              'Everything else still works the same — Write it, ↻, ▣ and '
+              'Change it are all still yours.',
+          value: m.autoWrite,
+          onChanged: widget.onAutoWriteChanged,
+        ),
+        if (m.autoWrite) ...<Widget>[
+          const SizedBox(height: 8),
+          _TapRow(
+            label: 'Written by itself this month',
+            // The real number and the ceiling, and what the ceiling costs at the
+            // endpoint actually selected. "12 of 60" on its own is a number
+            // nobody can act on; "12 of 60 · about $0.01 so far" is a fact about
+            // their own money.
+            value: '${m.autoWriteUsed} of ${m.autoWriteCeiling}'
+                '${m.autoWriteUsed == 0 ? ' · nothing yet' : ''}',
+            onTap: () => _autoWriteInfo(context, m),
+          ),
+        ],
         const SectionLabel('Connection'),
         _TapRow(
           label: 'Base URL',
@@ -1495,6 +1546,105 @@ class _SettingsScreenState extends State<SettingsScreen> {
         widget.onTestSearch,
         'the search source answered. Nothing was written.',
       );
+
+  /// What the monthly number means, in the reader's own money.
+  ///
+  /// A sheet rather than a longer row: the row says `12 of 60` and the sheet
+  /// answers the three questions that number raises — when does it reset, what
+  /// happens at the ceiling, and what has this actually cost. The last one is
+  /// computed from the endpoint the reader selected, because a ceiling of 60 is
+  /// $0.06 on MiMo and $0.60 on OpenAI and quoting it without saying which is
+  /// quoting nothing.
+  Future<void> _autoWriteInfo(BuildContext context, SettingsModel m) async {
+    final Palette c = context.colors;
+    // Roughly what one article costs at the selected endpoint. Parsed out of the
+    // endpoint's own cost line rather than kept as a second table of prices —
+    // one number per endpoint, stated once.
+    final double perArticle = _perArticle(m.writerId);
+    await AppSheet.show<void>(
+      context,
+      title: 'Written by itself',
+      builder: (BuildContext ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(Gap.sheetPad, 0, Gap.sheetPad, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text(
+              '${m.autoWriteUsed} of ${m.autoWriteCeiling} this month',
+              style: TextStyle(
+                fontFamily: TypeScale.mono,
+                fontSize: 13,
+                color: c.ink,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'The counter resets on the first of the month. Nothing carries '
+              'over and nothing is owed.',
+              style: TextStyle(
+                fontFamily: TypeScale.serif,
+                fontSize: 13.5,
+                height: 1.6,
+                color: c.ink2,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'At the ceiling the app stops writing by itself and says so once. '
+              'It does not retry, and it does not spend anything more. Your '
+              'cards still work — tap Write it on any of them.',
+              style: TextStyle(
+                fontFamily: TypeScale.serif,
+                fontSize: 13.5,
+                height: 1.6,
+                color: c.ink2,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              perArticle <= 0
+                  ? 'This writer does not publish a price, so the sheet cannot '
+                      'total it.'
+                  : 'So far that is about '
+                      '\$${(m.autoWriteUsed * perArticle).toStringAsFixed(3)} '
+                      'at ${WriterEndpoint.byId(m.writerId).name}\'s rate. The '
+                      'full month would be about '
+                      '\$${(m.autoWriteCeiling * perArticle).toStringAsFixed(2)}.',
+              style: TextStyle(
+                fontFamily: TypeScale.serif,
+                fontSize: 13.5,
+                height: 1.6,
+                color: c.ink3,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Only the app\'s own writes are counted here. Articles you tapped '
+              'Write it for are yours and are not part of this number.',
+              style: TextStyle(
+                fontFamily: TypeScale.serif,
+                fontSize: 13.5,
+                height: 1.6,
+                color: c.ink3,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// What one article costs at a given writer, in dollars. 0 when unknown.
+  ///
+  /// Read off the endpoint's own cost line, which is where the price is already
+  /// stated once. A second table of prices next to it would be the second copy
+  /// of the truth, and the two would drift the first time an endpoint changed.
+  static double _perArticle(String writerId) {
+    final String line = WriterEndpoint.byId(writerId).costLine;
+    final RegExpMatch? m = RegExp(r'\$([0-9.]+)').firstMatch(line);
+    return m == null ? 0 : (double.tryParse(m.group(1)!) ?? 0);
+  }
 
   Future<void> _editWriterBase(WriterEndpoint ep) async {
     final String? v = await TextPromptSheet.ask(
@@ -2458,6 +2608,77 @@ class _FaceChoice extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+/// A row with a switch, a label, and a sentence under it.
+///
+/// Separate from [_TapRow] because it is a different kind of control: a tap row
+/// goes somewhere and a switch row changes state in place. A row that looked
+/// tappable and then flipped a switch is a row the reader does not trust.
+class _SwitchRow extends StatelessWidget {
+  const _SwitchRow({
+    required this.label,
+    required this.sub,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String label;
+
+  /// What turning it on actually does, in one sentence. Never omitted: a switch
+  /// that spends money has to say so on the row, not behind a help dialog.
+  final String sub;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final Palette c = context.colors;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontFamily: TypeScale.sans,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: c.ink,
+                ),
+              ),
+            ),
+            // The state in WORDS beside the switch. A switch alone says what
+            // will happen; the word says what is happening now.
+            Text(
+              value ? 'on' : 'off',
+              style: TextStyle(
+                fontFamily: TypeScale.mono,
+                fontSize: 10.5,
+                color: value ? c.jade : c.ink3,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Switch(
+              value: value,
+              onChanged: onChanged,
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          sub,
+          style: TextStyle(
+            fontFamily: TypeScale.serif,
+            fontSize: 12.5,
+            height: 1.65,
+            color: c.ink3,
+          ),
+        ),
+      ],
     );
   }
 }

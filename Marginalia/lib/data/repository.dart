@@ -71,7 +71,17 @@ class LibraryRepository {
         instructionId: r.instructionId,
         plannedWords: r.plannedWords,
         plannedBand: _bandOf(r.plannedBand),
-        isWriting: r.isWriting,
+        // NEVER `r.isWriting`. The column exists and is written, but it is
+        // always written `false` — see `_persistSlots`. A row carrying `true` is
+        // a row written by an older build that did persist it, and restoring it
+        // here would hand the reader a card that claims a write is in flight
+        // when nothing is running: no Write it, no ↻, no ▣, no Change it, until
+        // they clear the app's data.
+        //
+        // The lock is in-memory and per-process (`_writeClaim` in the shell).
+        // A queue loaded from the disk has no write in flight, because a write
+        // in flight belongs to a process, and this process is not it.
+        isWriting: false,
       ));
     }
 
@@ -191,7 +201,19 @@ class LibraryRepository {
                 instructionId: Value(s.instructionId),
                 plannedWords: Value(s.plannedWords),
                 plannedBand: Value(s.plannedBand.name),
-                isWriting: Value(s.isWriting),
+                // ALWAYS FALSE, and never `s.isWriting`. See `QueueSlot.isWriting`:
+                // this is a lock held for the duration of one network call by
+                // the process that is making it, and writing it down is how a
+                // mid-flight `saveQueue` — from any other action, on any other
+                // card — leaves a `true` on the disk. A process that dies right
+                // after restores it in `loadQueue` and the card reads
+                // "Writing…" forever with Write it, ↻, ▣ and Change it all
+                // dead, the only escape being clearing the app's data.
+                //
+                // The lock lives on the shell (`_writeClaim`) for exactly this
+                // reason. The slot's flag is the CARD's picture of that lock and
+                // is rebuilt from the shell every time.
+                isWriting: const Value(false),
                 position: i,
               ),
             );
@@ -530,6 +552,35 @@ class LibraryRepository {
   }
 
   // ── derived reads ─────────────────────────────────────────────────────
+
+  /// Reads and listens for a set of articles, in ONE query.
+  ///
+  /// This exists for the queue cards. A card used to look identical whether it
+  /// had been read five times or never — the model has no `finished` state and
+  /// the card rendered no counter — so a reader who had just finished an article
+  /// saw a card that read as fresh, with `Done with it` sitting in its menu as
+  /// though it were. The prototype showed `read 3× · heard 5×` on every ready
+  /// card; that line was dropped in the port and this is it coming back.
+  ///
+  /// One query rather than one per card: three cards is three round trips to the
+  /// same table for numbers that are already sitting next to each other, and the
+  /// queue page is the first thing the reader sees on every launch.
+  ///
+  /// A missing row is (0, 0) and not an error — an article written by an older
+  /// build, or one whose ledger row was never created, has genuinely been read
+  /// zero times as far as this app can prove.
+  Future<Map<String, ({int reads, int listens})>> countsFor(
+      Iterable<String> articleIds) async {
+    final Set<String> ids = articleIds.where((String i) => i.isNotEmpty).toSet();
+    if (ids.isEmpty) return const <String, ({int reads, int listens})>{};
+    final List<LedgerRow> rows = await (db.select(db.ledgerRows)
+          ..where(($LedgerRowsTable t) => t.articleId.isIn(ids)))
+        .get();
+    return <String, ({int reads, int listens})>{
+      for (final LedgerRow r in rows)
+        r.articleId: (reads: r.reads, listens: r.listens),
+    };
+  }
 
   Future<Library> library(Queue queue) async {
     final List<LedgerRow> rows = await db.select(db.ledgerRows).get();

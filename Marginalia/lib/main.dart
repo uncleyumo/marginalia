@@ -248,7 +248,7 @@ class _Shell extends StatefulWidget {
   State<_Shell> createState() => _ShellState();
 }
 
-class _ShellState extends State<_Shell> {
+class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   final AppDatabase _db = AppDatabase();
   late final LibraryRepository _repo = LibraryRepository(_db);
   final SentenceAudio _audio = SentenceAudio();
@@ -315,6 +315,42 @@ class _ShellState extends State<_Shell> {
   /// `newest` · `oldest` · `mostStudied` · `leastStudied` · `random`.
   String _listenAutoOrder = 'newest';
 
+  /// Whether the app writes the next article by itself.
+  ///
+  /// ON BY DEFAULT, and that is the whole feature: a reader who has to tap
+  /// `Write it` after every article is a reader maintaining a queue, which is the
+  /// chore this app exists to remove. Turning it off restores the old behaviour
+  /// exactly — the queue still holds three cards, the reader just writes them
+  /// themselves.
+  ///
+  /// It is a preference and not a lock. Every card still has its `Write it`, its
+  /// `↻`, its `▣` and its `Change it`, and all of them work the same whether
+  /// this is on or off. Automatic writing only fills the gap the reader left.
+  bool _autoWrite = true;
+
+  /// How many articles the app has written by itself this month. Zero until the
+  /// counter is read, and the row says "nothing yet" rather than showing a stale
+  /// number from last month.
+  int _autoWriteUsed = 0;
+
+  /// Read the counter. Called at boot and after every automatic write, so the
+  /// Settings row is a fact and not a memory.
+  Future<void> _loadAutoWriteUsed() async {
+    try {
+      final String? month = await _repo.setting(_autoMonthKey);
+      if (month != _autoMonth()) {
+        if (!mounted) return;
+        setState(() => _autoWriteUsed = 0);
+        return;
+      }
+      final int used = int.tryParse(await _repo.setting(_autoCountKey) ?? '') ?? 0;
+      if (!mounted) return;
+      setState(() => _autoWriteUsed = used);
+    } catch (e) {
+      debugPrint('the automatic-write counter could not be read: $e');
+    }
+  }
+
   /// Mirrors of the two preferences the app root owns. Held here too because
   /// this is where the Settings screen is built from, and because this is the
   /// object that can reach the database to save them.
@@ -331,6 +367,11 @@ class _ShellState extends State<_Shell> {
   @override
   void initState() {
     super.initState();
+    // The shell observes the lifecycle because THIS is where the queue lives.
+    // The app root above also observes, but it owns the theme and nothing else —
+    // and a lifecycle callback that has to reach down into the shell to find the
+    // queue is the side channel this project keeps refusing to build.
+    WidgetsBinding.instance.addObserver(this);
     _boot();
     // Deliberately NOT awaited and not part of `_boot`. Reading the version
     // touches the platform channel, and the boot sequence is ordered on purpose
@@ -341,10 +382,32 @@ class _ShellState extends State<_Shell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _db.close();
     _audio.dispose();
     _api.close();
     super.dispose();
+  }
+
+  /// The reader came back to the app. One of the three moments an article may be
+  /// written by itself.
+  ///
+  /// FOREGROUND ONLY, AND THAT IS THE DESIGN. The obvious way to build "the next
+  /// one is written automatically" is a background task on a timer, and it is the
+  /// one thing this app refuses to do: a task that runs at 3am while the phone
+  /// charges spends money with nobody watching, which is precisely the surprise
+  /// the cost ceiling was written to make impossible. A reader who finished
+  /// yesterday's third article and went to bed gets the next one when they open
+  /// the app — not at 3am, and not before they are looking at the screen.
+  ///
+  /// `inactive` and `hidden` are ignored on purpose. `inactive` fires when a
+  /// notification shade is pulled down and when the app-switcher appears, which
+  /// is not the reader coming back; `hidden` is the screen going off.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (!_booted || _bootError != null) return;
+    unawaited(_maybeAutoWrite());
   }
 
   Future<void> _boot() async {
@@ -429,6 +492,13 @@ class _ShellState extends State<_Shell> {
 
     await _installSamples(samples);
 
+    // The queue cards carry their read and listen counts, so those have to be
+    // on screen with the cards rather than arriving a frame later — a card that
+    // renders without its counter and then grows one is a card that looks broken
+    // for a moment.
+    await _loadQueueCounts();
+    await _loadAutoWriteUsed();
+
     // Ask the phone what it can speak with, so the voice pane can state a fact
     // instead of leaving the reader to discover it by pressing play.
     unawaited(_audio.probeDevice());
@@ -471,6 +541,12 @@ class _ShellState extends State<_Shell> {
     final String? lcont = await get('listen:autoContinue');
     final String? lcontN = await get('listen:autoContinueCount');
     final String? lorder = await get('listen:autoOrder');
+    // Absent means ON, and that is the one default in this file that is not the
+    // quiet one. Every other preference here defaults to "do nothing until
+    // asked"; this one defaults to "keep the queue full", because a queue that
+    // empties unless somebody maintains it is the chore the app is for. A reader
+    // who disagrees turns it off in Settings and it stays off.
+    final String? autoWrite = await get('auto:write');
     // The two optional sources. Absent means ON — the reader saved a key, and
     // the common case is that they saved it because they wanted it. Only an
     // explicit "off" switches it off.
@@ -538,6 +614,9 @@ class _ShellState extends State<_Shell> {
       _voiceBase = vbase ?? VoiceEndpoint.mimo.baseUrl;
       _voiceName = vname ?? VoiceEndpoint.mimo.voices.first;
       _voiceSourceId = vsrc ?? (hasVoice ? 'mimo' : 'device');
+      // Only an explicit 'off' switches it off. Absent is ON — see the note
+      // where it is read.
+      _autoWrite = autoWrite != 'off';
 
       // Selecting MiMo with no key would produce a player that silently falls
       // back to the device voice on every sentence. Selection is honoured only
@@ -1120,6 +1199,10 @@ class _ShellState extends State<_Shell> {
             // card is the difference between "the writer keeps producing the
             // same thing" and "this one shipped with the app".
             isSample: _samples.containsKey(q.slots[i].articleId),
+            // What the reader has already done with it. Absent on a planned
+            // card — there is nothing to have read yet.
+            reads: _countOf(q.slots[i].articleId).reads,
+            listens: _countOf(q.slots[i].articleId).listens,
           ),
         const SizedBox(height: 14),
         // A footnote, not a card. It used to wear the same surface and border
@@ -1164,8 +1247,19 @@ class _ShellState extends State<_Shell> {
                   ? 'planned · not written yet · nothing has been paid for'
                   : (slot.article?.sentences.isEmpty ?? true)
                       ? 'written, but the text is no longer on this phone'
-                      : '${slot.article?.wordCount ?? 0} words · '
+                      : <String>[
+                          '${slot.article?.wordCount ?? 0} words',
                           '${slot.article?.minuteEstimate ?? 0} min read',
+                          // What has been done with it, in the menu too. The
+                          // card above carries the same line, and repeating it
+                          // here is not redundancy: the reader opened this menu
+                          // to decide what to DO, and the answer depends partly
+                          // on how much they have already done it.
+                          if (_countOf(slot.articleId).reads > 0)
+                            'read ${times(_countOf(slot.articleId).reads)}',
+                          if (_countOf(slot.articleId).listens > 0)
+                            'heard ${times(_countOf(slot.articleId).listens)}',
+                        ].join(' · '),
               style: TextStyle(
                 fontFamily: TypeScale.mono,
                 fontSize: 10.5,
@@ -1224,8 +1318,21 @@ class _ShellState extends State<_Shell> {
                 Navigator.of(ctx).pop();
                 await _writeAgain(q, index);
               }),
+              // The subtitle used to be `shelve it — this is not a read`, which
+              // is true and useless: it answers a question nobody had. The
+              // question a reader actually has, looking at a card they finished,
+              // is "if I say done, do I lose it?" — so this says what happens to
+              // the ARTICLE (kept, in the library, reopenable) and what happens
+              // to the SLOT (a free plan takes it). Two facts, one line.
+              //
+              // This row stays available on an article that has been read.
+              // Reading is not being done with something — the app's whole
+              // position is that a read-through is a beginning — so a reader who
+              // has read this twice may still want it out of the way, and the
+              // card now shows `read 2×` right above this menu so the choice is
+              // an informed one.
               _menuRow('Done with it',
-                  'shelve it — this is not a read', () async {
+                  'kept in your library · the slot gets a free plan', () async {
                 Navigator.of(ctx).pop();
                 await _doneWithIt(q, index);
               }, danger: true),
@@ -1293,6 +1400,20 @@ class _ShellState extends State<_Shell> {
   /// "Done with it" archives the article and puts a PLAN in its place. Free,
   /// and it never destroys anything — the shelf keeps the row and the counts.
   Future<void> _doneWithIt(Queue q, int index) async {
+    // THE LAST-ONE GUARD, and it is the other half of a promise made at the top
+    // of this file: whatever happens, at least one NEW article is waiting for
+    // you. `Done with it` frees a slot and puts a PLAN in it — which is the right
+    // outcome for a queue holding two ready cards, and the wrong outcome for a
+    // queue holding one, because it leaves three dashed cards and nothing to
+    // read. The reader would open the app to a queue with no article in it.
+    //
+    // Not a lock on the action, a lock on the moment: write the next one, or
+    // read this one again, and the row comes back.
+    if (q.readyCount <= 1) {
+      Toast.show(context,
+          'that is your last one · write the next, or read this again first');
+      return;
+    }
     final Article? retired = q.retireReadySlot(index, _freePlan());
     if (retired == null) {
       Toast.show(context, 'that one is only planned — write it first');
@@ -1331,6 +1452,25 @@ class _ShellState extends State<_Shell> {
   /// first time the reader edited one. Ten of them, newest-used first — the
   /// sheet is a picker, not the manager.
   Future<void> _changeIt(Queue q, int index) async {
+    // THE GUARD THAT WAS MISSING.
+    //
+    // `_reroll` has always had one — a reroll replaces the very plan the write
+    // in flight is using, so the article would come back for a topic the card no
+    // longer shows. `_changeIt` edits the same two fields for the same reason
+    // and did not have one: a reader who opened the sheet while a write was in
+    // the air got their edit applied to a card whose article was already paid
+    // for and about to overwrite it. Silently — the request went out, the money
+    // was spent, and the article that landed was not the one they had just
+    // described.
+    //
+    // Same guard, same sentence, same place. The ⋯ menu also reaches this method
+    // and is not itself gated, which is exactly why it lives here and not in the
+    // two callers.
+    if (q.slots[index].isWriting) {
+      Toast.show(context, 'a write is in flight · it lands in a moment');
+      return;
+    }
+
     final List<Instruction> saved =
         await _repo.instructions(limit: kRecentInstructions);
     if (!mounted) return;
@@ -1543,30 +1683,84 @@ class _ShellState extends State<_Shell> {
   /// places.
   final Map<String, Article> _written = <String, Article>{};
 
-  /// THE ONLY PATH THAT COSTS MONEY, and it is a tap.
-  /// The write. THE ONLY PLACE MONEY LEAVES THE PHONE.
+  /// SINGLE FLIGHT, held on the shell rather than on a slot.
+  ///
+  /// The slot's own `isWriting` flag cannot be the lock, for two separate
+  /// reasons, and both of them bite:
+  ///
+  ///  1. **It is persisted.** `_persistSlots` writes `isWriting: Value(s.isWriting)`
+  ///     verbatim, and every other action calls `saveQueue` — `Done with it` on
+  ///     another card, a reroll, an edit, a picture's intent line. Any of those
+  ///     landing mid-flight persists a `true` that is not true any more, and a
+  ///     process that dies right after restores it in `loadQueue`. The card then
+  ///     reads "Writing…" forever, with Write it, ↻, ▣ and Change it all dead,
+  ///     and the only way out is clearing the app's data. A lock that survives
+  ///     the process is not a lock, it is a brick.
+  ///  2. **A check-then-await-then-set is not a check at all.** Two callers
+  ///     entering the same window both read `false`.
+  ///
+  /// So: claim and test in one expression with no `await` between them, keep it
+  /// off the disk, and clear it on EVERY exit from `_write` — success, refusal,
+  /// no-key and crash. `_releaseWrite` is that clearing, and it is deliberately
+  /// idempotent because the exits are many.
+  bool _writeClaim = false;
+
+  /// True when this call took the lock. See [_writeClaim].
+  bool _claimWrite() => !_writeClaim && (_writeClaim = true);
+
+  /// Give the lock back. Safe to call twice, and on paths that never held it.
+  void _releaseWrite() {
+    _writeClaim = false;
+  }
+
+  /// THE ONLY PATH THAT COSTS MONEY.
   ///
   /// [pictures] is the reader's photographs, already shrunk. It defaults to
   /// empty because most writes have none — a card tapped with nothing attached
   /// must behave exactly as it always has.
+  ///
+  /// [auto] marks a write the app started by itself rather than one the reader
+  /// tapped. It changes two things and nothing else: a refusal is SILENT (there
+  /// is nobody standing there to tell, and a toast about a write the reader never
+  /// asked for is noise), and the receipt says `auto` so the reader can tell
+  /// which of today's articles they chose. It does not change the cost, the
+  /// budget, the prompt or the article.
   Future<void> _write(
     Queue q,
     int index, {
     List<Picture> pictures = const <Picture>[],
+    bool auto = false,
   }) async {
     QueueSlot slot = q.slots[index];
     if (!slot.isPlanned) {
       Toast.show(context, 'that one is already written');
       return;
     }
-    // The guard that costs money if it is missing.
+    // CLAIM THE SLOT FIRST, BEFORE ANYTHING IS AWAITED.
     //
-    // A slot stays `planned` for the whole write, so the check above does NOT
-    // stop a second tap — and a second tap is a second paid request, for an
-    // article that overwrites the first. The button is disabled while busy, but
-    // a disabled button is a UI fact and this is the one place that has to be a
-    // fact about the code.
-    if (slot.isWriting) return;
+    // This is the guard, and it is not a check — it is the check followed by the
+    // mutation, with no `await` between them. That gap is the whole bug: the
+    // old code checked `isWritingAnywhere` and then awaited the key twice
+    // (reidentify, `_keys.writer()`) before setting `isWriting = true`. Two
+    // callers entering that window — two taps, or the app's own automatic write
+    // racing the reader's — both read `false`, both walked on, and both reached
+    // the paid call. Two charges for one article, and the second overwrote the
+    // first. A disabled button is a UI fact; this is the only thing that is a
+    // fact about the code, so it has to be atomic.
+    //
+    // Claiming with a FIELD on the shell rather than with the slot's own flag,
+    // because the slot's flag is persisted (`isWriting: Value(s.isWriting)`) and
+    // any other action's `saveQueue` writes a mid-flight `true` into the
+    // database. See `_writeClaim`.
+    if (!_claimWrite()) {
+      // Silent for an automatic write: nobody asked for it, so nobody needs to
+      // be told it did not happen.
+      if (!auto) {
+        Toast.show(context,
+            'another article is being written · it lands in a moment');
+      }
+      return;
+    }
 
     // Never write a paid article under a bundled sample's id.
     //
@@ -1585,6 +1779,10 @@ class _ShellState extends State<_Shell> {
     if (key == null || key.trim().isEmpty) {
       Toast.show(context, 'no writer key is saved — nothing was spent');
       _push(_settings);
+      // Nothing was claimed and nothing was spent, so nothing is released
+      // either — but the claim was taken above and a reader who saves a key in
+      // Settings and comes back must find the card writable.
+      _releaseWrite();
       return;
     }
 
@@ -1601,11 +1799,15 @@ class _ShellState extends State<_Shell> {
     // has been left with nowhere to go.
     if (pictures.isNotEmpty && !ep.supportsVision) {
       Toast.show(context, ep.visionRefusal, duration: const Duration(seconds: 6));
+      _releaseWrite();
       return;
     }
 
     // The card shows it is working, so a tap cannot become a second call while
-    // the first is still in flight.
+    // the first is still in flight. Set HERE as well as in `_claimWrite`: the
+    // claim is what makes the code safe, and this is what makes the CARD show
+    // it — the two exits above happen before any paid call and release the
+    // claim so a retry is not silently dead.
     q.slots[index].isWriting = true;
     setState(() {});
 
@@ -1628,7 +1830,10 @@ class _ShellState extends State<_Shell> {
       for (final WordEntry w in _pool?.crucial(todayDay()) ?? const <WordEntry>[])
         w.lemma,
     ];
-    if (!mounted) return;
+    if (!mounted) {
+      _releaseWrite();
+      return;
+    }
 
     // The call and the saving are handled separately, because they fail for
     // different reasons and only one of them means "nothing was written". A
@@ -1699,6 +1904,7 @@ class _ShellState extends State<_Shell> {
       );
     } catch (e) {
       debugPrint('the article could not be saved: $e');
+      _releaseWrite();
       if (!mounted) return;
       setState(() {});
       Toast.show(
@@ -1709,6 +1915,10 @@ class _ShellState extends State<_Shell> {
       return;
     }
 
+    // The article landed and the slot is `ready`, so the lock goes back. Before
+    // the `mounted` check, not after: an unmounted shell still has to leave the
+    // world writable for the next one.
+    _releaseWrite();
     if (!mounted) return;
     setState(() {});
     // The call count is the REAL one, out of the loop. It used to say "one
@@ -1717,8 +1927,117 @@ class _ShellState extends State<_Shell> {
     // price on screen has to be the price that was charged.
     final int calls = ran?.modelCalls ?? 1;
     final String callLine = calls == 1 ? 'one call' : '$calls calls';
-    Toast.show(context,
-        '${article.title} is ready · ~${article.wordCount} words · $callLine');
+    // An automatic write says so. Not an apology and not a celebration — a
+    // receipt, so that a reader looking at three new articles can tell which of
+    // them they asked for. It is also the only place the monthly count is
+    // incremented: on SUCCESS, never on the attempt, because a write that failed
+    // spent nothing and must not push the reader towards their ceiling.
+    if (auto) unawaited(_countAutoWrite());
+    Toast.show(
+      context,
+      '${article.title} is ready · ~${article.wordCount} words · $callLine'
+      '${auto ? ' · auto' : ''}',
+    );
+  }
+
+  // ── the automatic write ────────────────────────────────────────────────
+
+  /// This month's automatic writes, and the ceiling on them.
+  ///
+  /// Stored as two settings rather than a new table because that is what they
+  /// are: one counter and one preference. Reset by the month string, not by a
+  /// scheduled job — the counter carries the month it belongs to, and a month
+  /// that has changed is a counter that starts again. No cron, no migration.
+  static const String _autoMonthKey = 'auto:month';
+  static const String _autoCountKey = 'auto:count';
+
+  /// How many articles the app may write by itself in one month.
+  ///
+  /// 60 is three a day for a full month, which is more than this queue can hold
+  /// — the queue is three cards, so the app can only ever be one write behind.
+  /// The number is a CEILING against a runaway bug, not a budget a reader is
+  /// expected to reach: at the most expensive endpoint configured (~$0.01 an
+  /// article) the whole month is $0.60, and at MiMo's ~$0.001 it is $0.06.
+  ///
+  /// When it is reached the app stops and says so ONCE. It does not retry, it
+  /// does not ask again every launch, and it does not spend a cent more until
+  /// the month turns or the reader raises it.
+  static const int kAutoWriteMonthlyCeiling = 60;
+
+  /// `2026-10`. The month this counter belongs to.
+  static String _autoMonth([DateTime? now]) {
+    final DateTime n = now ?? DateTime.now();
+    return '${n.year}-${n.month.toString().padLeft(2, '0')}';
+  }
+
+  /// Whether an automatic write is allowed right now. Cheap, and asks nothing.
+  ///
+  /// The four conditions, and each one is a reason the app must not spend:
+  ///
+  ///  1. **the reader left it on.** Off by nothing — it is on by default, and
+  ///     Settings → Who writes turns it off in one tap.
+  ///  2. **there is a plan to write.** Automatic writing only ever turns a
+  ///     PLANNED card into an article. It never overwrites something ready and
+  ///     never invents a subject the reader has not seen.
+  ///  3. **nothing is already in flight.** Single flight, across the queue.
+  ///  4. **the month is not full.** See [kAutoWriteMonthlyCeiling].
+  ///
+  /// A missing key is deliberately NOT a condition. A reader with no key gets
+  /// nothing spent and no toast — the queue page already says a key is needed
+  /// on every planned card, and a toast about it on every launch is noise.
+  Future<bool> _mayAutoWrite(Queue q) async {
+    if (!_autoWrite) return false;
+    if (q.nextPlanned == null) return false;
+    // The LOCK, not a picture of it. `q.isWritingAnywhere` reads the slot's
+    // flag, which is a rendering fact; `_writeClaim` is the thing that actually
+    // stops a second paid call. Checking the flag here would let an automatic
+    // write queue up behind one that had not yet set its own flag.
+    if (_writeClaim) return false;
+    try {
+      final String? month = await _repo.setting(_autoMonthKey);
+      final String? count = await _repo.setting(_autoCountKey);
+      final int used = month == _autoMonth() ? (int.tryParse(count ?? '') ?? 0) : 0;
+      if (used >= kAutoWriteMonthlyCeiling) return false;
+    } catch (e) {
+      // Unreadable counter: do not spend. The failure mode of a wrong "0" is a
+      // month of articles; the failure mode of a wrong "full" is a reader who
+      // taps Write it, which the app still does perfectly well.
+      debugPrint('the automatic-write counter could not be read: $e');
+      return false;
+    }
+    return true;
+  }
+
+  /// Count one automatic write. Called only after the article landed.
+  Future<void> _countAutoWrite() async {
+    try {
+      final String month = _autoMonth();
+      final String? stored = await _repo.setting(_autoMonthKey);
+      final int used =
+          stored == month ? (int.tryParse(await _repo.setting(_autoCountKey) ?? '') ?? 0) : 0;
+      await _save(_autoMonthKey, month);
+      await _save(_autoCountKey, '${used + 1}');
+      if (!mounted) return;
+      setState(() => _autoWriteUsed = used + 1);
+    } catch (e) {
+      debugPrint('the automatic-write counter could not be written: $e');
+    }
+  }
+
+  /// Start the next article by itself, if the four conditions hold.
+  ///
+  /// Called from three moments, all of them the reader having just done
+  /// something: finished a read, finished a listen, and came back to the app.
+  /// NEVER from a timer and never from a background task — see the note on
+  /// `_autoTick` below for why that is the whole point.
+  Future<void> _maybeAutoWrite() async {
+    final Queue? q = _queue;
+    if (q == null || q.isEmpty) return;
+    if (!await _mayAutoWrite(q)) return;
+    final int i = q.nextPlannedIndex;
+    if (i < 0) return;
+    debugPrint('auto: writing the next article (slot $i)');
+    await _write(q, i, auto: true);
   }
 
   // ── the research the writer may do ────────────────────────────────────
@@ -1818,6 +2137,7 @@ class _ShellState extends State<_Shell> {
     if (index >= 0 && index < q.slots.length) {
       q.slots[index].isWriting = false;
     }
+    _releaseWrite();
     if (!mounted) return;
     setState(() {});
     Toast.show(context, message, duration: const Duration(seconds: 6));
@@ -2019,6 +2339,7 @@ class _ShellState extends State<_Shell> {
     Toast.show(context, 'counted a listen. reads untouched.');
     setState(() {});
     unawaited(_loadListenCounts(a.id));
+    unawaited(_loadQueueCounts());
   }
 
   /// One completed play-through. Counting lives HERE rather than on Play,
@@ -2036,7 +2357,19 @@ class _ShellState extends State<_Shell> {
       if (_autoContinueLeft <= 0) return;
       _autoContinueLeft--;
     }
+    // TRIGGER TWO of three: the commute run reached the end of the queue. Checked
+    // BEFORE `_playNextArticle` because that method is silent about why it did
+    // nothing — it returns the same way for "there is no next article" and for
+    // "the next article could not be loaded" — and only the first of those is a
+    // reason to start writing.
+    //
+    // If there IS a next one, the reader is about to be listening to it and does
+    // not need a write started behind their back. If there is not, the queue is
+    // empty of anything to hear and this is exactly the moment to fill it.
+    final bool more = _peekNextListen() != null;
     await _playNextArticle();
+    if (more) return;
+    unawaited(_maybeAutoWrite());
   }
 
   /// Remaining auto-continues this session when the mode is `count`.
@@ -2046,6 +2379,44 @@ class _ShellState extends State<_Shell> {
 
   final Map<String, int> _studyCounts = <String, int>{};
   final Map<String, String> _lastSeen = <String, String>{};
+
+  /// Reads and listens per article, for the queue cards.
+  ///
+  /// Kept SEPARATE from [_studyCounts], which is reads+listens added together
+  /// for the auto-continue ordering. The card shows them as two numbers because
+  /// they are two facts — hearing an article on a bus is not reading it — and a
+  /// card that showed only a sum would be a card that says "you met this 5
+  /// times" about something read once and heard four.
+  final Map<String, ({int reads, int listens})> _articleCounts =
+      <String, ({int reads, int listens})>{};
+
+  /// Zero for an article nothing is known about, which is the honest answer.
+  ({int reads, int listens}) _countOf(String articleId) =>
+      _articleCounts[articleId] ?? (reads: 0, listens: 0);
+
+  /// Read the whole queue's counters in one query.
+  ///
+  /// Called after every count and after boot, so the card that was just counted
+  /// changes under the reader's finger. Re-reading all three rather than
+  /// incrementing the one in memory: the database is the source of truth, and a
+  /// number the UI added itself is a number that can disagree with the row the
+  /// History tab is built from.
+  Future<void> _loadQueueCounts() async {
+    final Queue? q = _queue;
+    if (q == null) return;
+    try {
+      final Map<String, ({int reads, int listens})> fresh =
+          await _repo.countsFor(<String>[
+        for (final QueueSlot s in q.slots) s.articleId,
+      ]);
+      if (!mounted) return;
+      setState(() => _articleCounts
+        ..clear()
+        ..addAll(fresh));
+    } catch (e) {
+      debugPrint('the queue counters could not be read: $e');
+    }
+  }
 
   /// Reads + listens, the same "how much have I met this" number the shelf uses.
   int _studyOf(String articleId) => _studyCounts[articleId] ?? 0;
@@ -2318,12 +2689,25 @@ class _ShellState extends State<_Shell> {
     }
     if (!mounted) return;
     setState(() => _counting = false);
+    // The queue card's counter too. The reader just counted a read on the
+    // Article screen; when they go back to the queue that card has to say so, or
+    // the count they just paid attention to is invisible where they will look
+    // for it next.
+    unawaited(_loadQueueCounts());
     Toast.show(
       context,
       _readsToday <= 1
           ? 'counted · it stays in your queue'
           : 'counted ${_readsToday} times today · it stays in your queue',
     );
+    // TRIGGER ONE of three: the reader just finished an article. This is the
+    // moment the next one should start — not a minute later on a timer, and not
+    // at 3am on a background task. If the conditions hold, the planned card
+    // begins writing while the reader is still looking at the toast.
+    //
+    // It is not awaited, and that matters: the write is a 1–3 minute network call
+    // and the reader must not wait on it to leave this screen.
+    unawaited(_maybeAutoWrite());
   }
 
   /// The tap that makes this app what it is.
@@ -2682,6 +3066,9 @@ class _ShellState extends State<_Shell> {
         newsOn: _newsOn,
         searchKeySaved: _hasSearchKey,
         searchOn: _searchOn,
+        autoWrite: _autoWrite,
+        autoWriteUsed: _autoWriteUsed,
+        autoWriteCeiling: kAutoWriteMonthlyCeiling,
         version: _version,
         build: _buildNumber,
       ),
@@ -2819,6 +3206,15 @@ class _ShellState extends State<_Shell> {
         await _save('search:on', on ? 'on' : 'off');
       },
       onTestSearch: _testSearch,
+      onAutoWriteChanged: (bool on) {
+        setState(() => _autoWrite = on);
+        unawaited(_save('auto:write', on ? 'on' : 'off'));
+        // Turning it ON is worth acting on immediately. A reader who has just
+        // turned this on is looking at a queue with a planned card in it, and
+        // the moment they flip the switch is the moment they want it to start —
+        // not the next time they happen to finish an article.
+        if (on) unawaited(_maybeAutoWrite());
+      },
 
       onOpenDebugLog: () => _push(() => DebugLogScreen(onBack: _pop)),
     );

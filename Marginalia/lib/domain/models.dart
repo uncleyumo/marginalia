@@ -334,6 +334,14 @@ class QueueSlot {
 
   /// True while a write is in flight. Distinct from [state]: this is a
   /// transient, not one of the two resting states.
+  ///
+  /// A PICTURE OF A LOCK, AND NOT THE LOCK. The lock is a field on the shell
+  /// (`_writeClaim`), because it has to be claimed and tested in one expression
+  /// with no `await` between them and because it has to die with the process.
+  /// This flag is what the CARD renders from, and it is deliberately NOT
+  /// persisted: `saveQueue` writes `false` and `loadQueue` reads `false`, so a
+  /// queue off the disk never claims a write is in flight. Persisting it let a
+  /// mid-flight save from any other action brick a card permanently.
   bool isWriting;
 
   bool get isPlanned => state == SlotState.planned;
@@ -388,3 +396,19 @@ class QueueSlot {
   String toString() => 'QueueSlot($articleId, ${state.name}'
       '${isWriting ? ', writing' : ''}, subject: $subjectLabel)';
 }
+/// `once` / `twice` / `4 times`.
+///
+/// Words for the small numbers, because these lines are read as sentences and
+/// `1 times` is the kind of thing that makes a reader stop trusting the rest of
+/// the interface.
+///
+/// ONE definition for the three places a count appears — the queue card, its
+/// ⋯ menu, and the article screen's count line. It was a private helper in each
+/// of the first two and a static in the third, which is three copies of a
+/// sentence this app shows everywhere: a counter that said `2 times` on the card
+/// and `twice` in the menu would read as two different facts about one article.
+String times(int n) => switch (n) {
+      1 => 'once',
+      2 => 'twice',
+      _ => '$n times',
+    };

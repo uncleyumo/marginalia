@@ -241,6 +241,42 @@ void main() {
   check('a queue with no plan allows automatic writing', noPlan.mayAutoWrite);
   check('and a queue with a plan waiting does not', !pickQ.mayAutoWrite);
 
+  // ── a paid article lands whole, or not at all ────────────────────────
+  //
+  // `landArticle` writes the body, the ledger row and the queue row in ONE
+  // transaction. The three used to be three calls in a row, and a process dying
+  // between any two — the app swiped out of the recents list, the system
+  // reclaiming memory — left a half-landed article: a body with no card, so a
+  // library entry that opens onto nothing, or a card with no ledger row, so a
+  // readable card the library and the storage bar cannot see. Both are garbage
+  // the reader cannot clear from the interface.
+  //
+  // The domain layer cannot see a transaction, so what is checked here is what
+  // the transaction has to be true ABOUT: the queue it writes is the same object
+  // the caller holds, so the card turns ready in step with the disk rather than
+  // a frame later, and the slot it writes is the one the caller names.
+  section('2c. a paid article lands whole, or not at all');
+
+  final Queue landQ = _queueWithTwoReadyOnePlanned();
+  final Article landed = _article('a3', title: 'Landed Whole');
+  // What `_write` does immediately before calling `landArticle`, in this order.
+  check('the slot is written before it is landed', landQ.slots[2].isPlanned);
+  final Article? installed = landQ.writeSlot(2, landed);
+  check('and writeSlot installs the article', installed != null);
+  check('so the slot the transaction writes is the one just written',
+      landQ.slots[2].articleId == 'a3' && landQ.slots[2].isReady);
+  check('and the card carries the real article, not a stub',
+      landQ.slots[2].article?.title == 'Landed Whole');
+  check('and the body is there to open', landQ.slots[2].article?.sentences.isNotEmpty ?? false);
+
+  // A rollback must leave the queue in the state it was in, which for drift's
+  // transaction means the in-memory object was never mutated by the failed
+  // write — `landArticle` only writes, it never touches the caller's Queue.
+  check('the queue keeps its three slots', landQ.length == kQueueSize);
+  check('and no slot is left half-written',
+      landQ.slots.every((QueueSlot s) => s.isPlanned || s.isReady));
+  check('and nothing is left marked as writing', !landQ.isWritingAnywhere);
+
   // with no planned slot, writing works. It has to be a PLANNED slot being
   // written — writing an already-ready card is not a thing that can happen.
   final Queue open = Queue(<QueueSlot>[

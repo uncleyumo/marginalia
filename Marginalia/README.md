@@ -7,6 +7,14 @@ you tap Write it.
 The name is the thing itself: marginalia are the notes a reader leaves in the
 margin. This app is a margin that answers back.
 
+> **Generation is remote, not local.** There is no local model in this app — no
+> bundled `gguf`, no ONNX, nothing that writes text on the device. Every article
+> is produced by a remote API over HTTPS (DeepSeek, MiMo or OpenAI), which is why
+> a new article needs a key and a connection and is the only thing here that costs
+> money. What is local: the bundled samples, the bundled dictionary, the SQLite
+> database, and the word-marking. With no key you can read, hear and look words
+> up in airplane mode for $0.00 — you just cannot have a new article written.
+
 ## What it does
 
 - **Read.** An article is a block of prose with every word tappable. Tap a word

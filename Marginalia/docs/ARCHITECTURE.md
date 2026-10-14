@@ -291,6 +291,45 @@ So the flag on the slot is a *picture* of the lock — what the card renders —
 a text-only model refusing pictures, a provider refusal, a storage failure, and
 an unmounted shell. `_releaseWrite` is idempotent because the exits are many.
 
+### Generation is remote, and there is no local model
+
+Worth stating plainly, because the app is otherwise almost entirely offline and
+the distinction decides both the cost and the connection requirement: **there is
+no local language model here.** No bundled `gguf`, no ONNX runtime, nothing that
+produces text on the device. Every article is written by a remote API over HTTPS
+— DeepSeek, MiMo or OpenAI — via `RemoteApi._post`, and that is the only place
+money leaves the phone.
+
+Everything else is local: the bundled samples, the bundled 392,695-entry
+dictionary, the SQLite database, the word pool and the marking. The device's own
+TTS engine speaks, so listening is local too. With no key the app reads, hears
+and looks words up in airplane mode for $0.00; it just cannot have a new article
+written.
+
+### A paid article lands whole, or not at all
+
+`landArticle` writes the body, the ledger row and the queue row in ONE drift
+transaction. They used to be three separate calls in a row, and a process dying
+between any two of them — the app swiped out of the recents list, the system
+reclaiming memory — left a half-landed article: a body with no card, so an entry
+in the library that opens onto nothing, or a card with no ledger row, so a
+readable card the library and the storage bar cannot see. Both are garbage the
+reader has no way to clear from the interface, and both were reachable without
+doing anything wrong.
+
+One transaction is the same guarantee `_persistSlots` already makes for the
+queue's three slots. The ordering inside it is still body → ledger → queue, for
+the reason it always was: a card that says `ready` while its body is not on the
+phone opens nothing after a restart.
+
+What this does NOT close is the third window — money spent, response never
+received. The request is already at the provider and a local timeout says nothing
+about what they have billed; `RemoteApi._post` says so in its own comment rather
+than pretending otherwise. The guarantee is narrower and worth stating exactly:
+**a paid article either lands completely or leaves nothing behind to clean up.**
+The failure path in `_write` puts the card back to tappable and says both halves
+out loud — the money was spent, and nothing landed.
+
 ## Design tokens
 
 `core/design/tokens.dart` declares colour, type, spacing, radii and motion once.

@@ -630,20 +630,49 @@ class LibraryRepository {
     return _articleFromRow(row);
   }
 
-  /// Store a body and its real size.
+  /// LAND AN ARTICLE: body, card and ledger, in ONE transaction, or not at all.
   ///
-  /// Returns the size in BYTES, measured rather than estimated — the caller
-  /// puts it on the ledger, so the storage bar and the shelf agree with each
-  /// other instead of one of them guessing.
-  Future<int> saveArticle(Article a) async {
+  /// This is the method that closes the last two of the three windows a killed
+  /// process could fall into. The three writes used to be three separate calls
+  /// in a row, and a process dying between any two of them left a half-landed
+  /// article: a body with no card (an article in the library that opens onto
+  /// nothing), or a card with no ledger row (a readable card the library and
+  /// the storage bar cannot see). Both are garbage a reader cannot clear from
+  /// the interface, and both were reachable by the app being swiped away in the
+  /// recents list.
+  ///
+  /// One transaction means the three rows are written together or not at all,
+  /// which is the same guarantee `_persistSlots` already makes for the queue's
+  /// three slots. The first window — money spent, response never received — is
+  /// NOT closed by this and cannot be: the request is already at the provider,
+  /// and a local timeout says nothing about what they have billed. What this
+  /// does guarantee is that a paid article either lands completely or leaves
+  /// nothing behind to clean up.
+  ///
+  /// [queue] is written AFTER [article] inside the same transaction, and the
+  /// body must come first for the reason the ordering in `_write` states: a card
+  /// that says `ready` while its body is not on the phone opens nothing after a
+  /// restart. Inside one transaction that ordering is safe and still correct.
+  ///
+  /// Returns the article's real size in bytes, measured rather than guessed.
+  /// Throws if the transaction did not commit — see the note on the catch.
+  Future<int> landArticle({
+    required Article article,
+    required Queue queue,
+    required int slotIndex,
+    required String title,
+    required String day,
+    required int kilobytes,
+    List<String> keywords = const <String>[],
+  }) async {
     final String sentences = jsonEncode(<String, Object?>{
       // Wrapped rather than given a column of its own: `titleCn` is display
       // only, it is optional on every older row, and a schema migration plus a
       // codegen pass is a lot of machinery for one caption. A bare LIST is
       // still accepted on read, so rows written before this stays readable.
-      if (a.titleCn.isNotEmpty) 'titleCn': a.titleCn,
+      if (article.titleCn.isNotEmpty) 'titleCn': article.titleCn,
       'items': <Object?>[
-        for (final Sentence s in a.sentences)
+        for (final Sentence s in article.sentences)
           <String, Object?>{
             'en': s.english,
             'cn': s.chinese,
@@ -652,7 +681,7 @@ class LibraryRepository {
       ],
     });
     final String marks = jsonEncode(<Object?>[
-      for (final Mark m in a.marks)
+      for (final Mark m in article.marks)
         <String, Object?>{
           'surface': m.surface,
           'lemma': m.lemma,
@@ -660,27 +689,100 @@ class LibraryRepository {
           'tier': m.tier.name,
         },
     ]);
-    final String keywords = encodeList(a.keywords);
+    final String encodedKeywords = encodeList(keywords);
 
     // The real number, measured rather than guessed. UTF-8 bytes, because that
     // is what the file will actually cost on disk.
     final int bytes = utf8.encode(sentences).length +
         utf8.encode(marks).length +
-        utf8.encode(keywords).length;
+        utf8.encode(encodedKeywords).length;
 
-    await db.into(db.articleRows).insertOnConflictUpdate(
-          ArticleRowsCompanion.insert(
-            articleId: a.id,
-            title: a.title,
-            keywords: Value(keywords),
-            sentences: sentences,
-            marks: marks,
-            wordCount: Value(a.wordCount),
-            minuteEstimate: Value(a.minuteEstimate),
-            bytes: Value(bytes),
-          ),
-        );
-    return bytes;
+    // No catch here, and that is deliberate. This layer lets a failure
+    // propagate — it has no way to tell the reader anything, and swallowing it
+    // would return a `null` the caller reads as "nothing was written" when the
+    // truth is "the write failed". The caller is the one with a Toast, so the
+    // caller is the one that reports it.
+    return db.transaction<int>(() async {
+        // 1. the body, first — see the ordering note above.
+        await db.into(db.articleRows).insertOnConflictUpdate(
+              ArticleRowsCompanion.insert(
+                articleId: article.id,
+                title: article.title,
+                keywords: Value(encodedKeywords),
+                sentences: sentences,
+                marks: marks,
+                wordCount: Value(article.wordCount),
+                minuteEstimate: Value(article.minuteEstimate),
+                bytes: Value(bytes),
+              ),
+            );
+
+        // 2. the ledger, so the library and the storage bar see it.
+        final LedgerRow? existing = await (db.select(db.ledgerRows)
+              ..where(($LedgerRowsTable t) => t.articleId.equals(article.id)))
+            .getSingleOrNull();
+        if (existing == null) {
+          await db.into(db.ledgerRows).insert(
+                LedgerRowsCompanion.insert(
+                  articleId: article.id,
+                  title: title,
+                  keywords: Value(encodedKeywords),
+                  kilobytes: Value(kilobytes),
+                  lastSeenDay: Value(day),
+                ),
+              );
+        } else {
+          // The row is already there, so this is a RE-write of an article the
+          // ledger has met. Only the genuinely missing facts are filled in —
+          // the size when the bytes were freed, the keywords on a row that
+          // predates them — and `lastSeenDay` is refreshed, which is the point:
+          // the writer should not immediately produce a near-copy.
+          await (db.update(db.ledgerRows)
+                ..where(($LedgerRowsTable t) => t.articleId.equals(article.id)))
+              .write(LedgerRowsCompanion(
+            kilobytes: existing.kilobytes == 0
+                ? Value(kilobytes)
+                : const Value.absent(),
+            keywords: existing.keywords == '[]' && keywords.isNotEmpty
+                ? Value(encodedKeywords)
+                : const Value.absent(),
+            lastSeenDay: Value(day),
+          ));
+        }
+
+        // 3. the queue, last — and it is the SAME object `_write` is holding,
+        // so the caller's card turns ready in step with the disk rather than
+        // one frame later. `_persistSlots` cannot be called from inside a
+        // transaction it is not part of, so the three rows are written here
+        // exactly as it writes them.
+        await db.into(db.queueRows).insertOnConflictUpdate(
+              QueueRowsCompanion.insert(
+                id: Value(slotIndex),
+                articleId: queue.slots[slotIndex].articleId,
+                state: queue.slots[slotIndex].state.name,
+                instruction: Value(queue.slots[slotIndex].instruction),
+                instructionId: Value(queue.slots[slotIndex].instructionId),
+                plannedWords: Value(queue.slots[slotIndex].plannedWords),
+                plannedBand: Value(queue.slots[slotIndex].plannedBand.name),
+                // ALWAYS FALSE, and never `s.isWriting`. See `QueueSlot.isWriting`:
+                // this is a lock held for the duration of one network call by
+                // the process that is making it, and writing it down is how a
+                // mid-flight `saveQueue` — from any other action, on any other
+                // card — leaves a `true` on the disk. A process that dies right
+                // after restores it in `loadQueue` and the card reads
+                // "Writing…" forever with Write it, ↻, ▣ and Change it all
+                // dead, the only escape being clearing the app's data.
+                //
+                // The lock lives on the shell (`_writeClaim`) for exactly this
+                // reason. The slot's flag is the CARD's picture of that lock and
+                // is rebuilt from the shell every time.
+                isWriting: const Value(false),
+                position: slotIndex,
+              ),
+            );
+
+        return bytes;
+      });
   }
 
   /// Drop a body. Called ONLY from `freeSpace`, and it deliberately cannot

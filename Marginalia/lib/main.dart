@@ -1,8 +1,15 @@
 // Marginalia — three articles are always waiting.
 //
-// No-Stop English: an offline-first English reader. Five screens, two verbs, and
+// No-Stop English: an offline-first READER. Five screens, two verbs, and
 // a queue of three. No schedule, no streak, and nothing anywhere asks whether you
 // remember a word.
+//
+// "Offline-first" describes the reading half and nothing else. There is no local
+// language model in this app — every article is written by a remote API over
+// HTTPS, which is why a write needs a key and a connection and is the only thing
+// here that costs money. Reading, listening and looking words up are local and
+// free: bundled samples, a bundled 392,695-entry dictionary, SQLite, and the
+// phone's own TTS engine.
 //
 // This file is the wiring: the domain rules live in lib/domain and import
 // nothing, the storage in lib/data, and the screens in lib/features. What is here
@@ -1149,20 +1156,23 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         const SizedBox(height: 4),
         // HONEST ABOUT WHAT HAPPENS WHEN YOU FINISH ONE.
         //
-        // This line used to promise "the next is written at once", which the
-        // code has never done and cannot do: there is no timer, no background
-        // task and no write anywhere but a tap, and `mayAutoWrite` guards a path
-        // that does not exist. A reader who read three articles, watched nothing
-        // change, and had been told the next one arrives "at once" has been lied
-        // to by the one screen that promises nothing else.
+        // This line used to promise "the next is written at once", which was
+        // then true of nothing: there was no timer, no background task and no
+        // write anywhere but a tap, and `mayAutoWrite` guarded a path that did
+        // not exist. A reader who read three articles, watched nothing change,
+        // and had been told the next one arrives "at once" had been lied to by
+        // the one screen that promises nothing else.
         //
-        // So it now says what actually happens, and it says the good half too:
-        // reading never takes anything away, and the next write still costs
-        // exactly what the card says and not a cent more.
+        // Since 0.4.0 the sentence is true, and the sentence is now about what
+        // is still true underneath it: reading never takes anything away, and
+        // the write costs exactly what the card says and not a cent more. The
+        // automatic write is described where the reader turned it on — in
+        // Settings, on the switch itself — rather than repeated here, because a
+        // footnote is where a promise goes to be ignored.
         Text(
           'Read in any order, or just listen. What you have read stays where it '
-          'is — the only thing that costs money is Write it, and nothing is '
-          'spent until you tap it.',
+          'is — writing an article costs what the card says, and nothing is '
+          'spent unless you or the automatic write ask for it.',
           style: TextStyle(
             fontFamily: TypeScale.serif,
             fontSize: 13,
@@ -1886,30 +1896,48 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // The article exists from here on. A failure below is a STORAGE failure.
     _written[article.id] = article;
     q.writeSlot(index, article);
+    // ONE transaction for body + ledger + card, or none of them. It used to be
+    // three separate calls in a row, and a process dying between any two of them
+    // — the app swiped out of the recents list, the system reclaiming memory —
+    // left a half-landed article: a body with no card, so an entry in the
+    // library that opens onto nothing, or a card with no ledger row, so a
+    // readable card the library and the storage bar cannot see. Both are garbage
+    // the reader has no way to clear from the interface.
+    //
+    // The third window — money spent and the response never received — is NOT
+    // closed by this and cannot be. The request is already at the provider and a
+    // local timeout says nothing about what they have billed. What this does
+    // guarantee is that a paid article lands completely or leaves nothing behind.
+    final int bytes;
     try {
-      // The body goes to the database BEFORE the queue says `ready`. A card
-      // that says ready while the body is only in memory is a card that opens
-      // nothing after a restart — which is exactly the bug this fixes.
-      final int bytes = await _repo.saveArticle(article);
-      await _repo.saveQueue(q);
-      await _repo.recordLedger(
-        articleId: article.id,
+      bytes = await _repo.landArticle(
+        article: article,
+        queue: q,
+        slotIndex: index,
         title: article.title,
         keywords: article.keywords,
         day: todayDay(),
         // Ceiling, not floor: an article smaller than a kilobyte still costs a
         // kilobyte of the budget, and a bar that says "0 KB" next to an article
-        // the reader can see is a bar nobody believes again.
-        kilobytes: (bytes / 1024).ceil().clamp(1, 1 << 20),
+        // the reader can see is a bar nobody believes again. The estimate is
+        // made HERE rather than inside the transaction because it is the
+        // caller's figure of speech, and the real byte count comes back out.
+        kilobytes: (article.wordCount * 6 ~/ 1024) + 1,
       );
     } catch (e) {
+      // The transaction rolled back, so the article is NOT on this phone in any
+      // form — no body, no card, no ledger row, and the card goes back to being
+      // tappable rather than sitting there claiming an article that is not
+      // there. The money WAS spent; that is the one window no code can close.
       debugPrint('the article could not be saved: $e');
+      q.slots[index].isWriting = false;
       _releaseWrite();
       if (!mounted) return;
       setState(() {});
       Toast.show(
         context,
-        '${article.title} is here, but could not be saved to this phone · $e',
+        '${article.title} was written, but could not be saved to this phone · '
+            'the money was spent and nothing landed',
         duration: const Duration(seconds: 6),
       );
       return;
@@ -1927,6 +1955,9 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // price on screen has to be the price that was charged.
     final int calls = ran?.modelCalls ?? 1;
     final String callLine = calls == 1 ? 'one call' : '$calls calls';
+    // The real size, measured rather than guessed, so the toast says what the
+    // article actually cost on the phone. The ledger carries the same number.
+    final String sizeLine = '${(bytes / 1024).ceil()} KB';
     // An automatic write says so. Not an apology and not a celebration — a
     // receipt, so that a reader looking at three new articles can tell which of
     // them they asked for. It is also the only place the monthly count is
@@ -1936,7 +1967,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     Toast.show(
       context,
       '${article.title} is ready · ~${article.wordCount} words · $callLine'
-      '${auto ? ' · auto' : ''}',
+      ' · $sizeLine${auto ? ' · auto' : ''}',
     );
   }
 

@@ -377,3 +377,64 @@ dart tool/check_dictionary.dart
 - 7.3 两篇音色是否不同：需听感对比，截图无法取证；`_resolveVoice` 每次 stop 重摇。
 - 8.5 Copy all 剪贴板内容：adb 读不到 Android 剪贴板；`AgentLog.dump()` 的分段
   格式由 check_agent 覆盖。
+
+## 0.4.0+11：一次纯代码演算与排查（未做实机/模拟器测试）
+
+只读审计 + 修复，全程 `flutter analyze` / `check_invariants` / `flutter test`，
+**没有编译 APK，没有连模拟器**。基线 28 issues / 0 error、172 不变量、8 测试。
+
+### 演算发现并修掉的 11 个缺陷
+
+**花钱相关（4 个）**
+
+1. **拿到 HTTP 200 之后失败，一律谎称"没花钱"。** `spent: true` 全项目只存在于
+   `agent.dart`，`api.dart` 和 `writer.dart` 各 0 处。`_text` 的空 choices、
+   `_object` 的非 JSON、`parse` 的四个失败、`_planFrom`——全部抛在 2xx 之后，
+   而 200 通常计费。读者看到 "nothing was spent"，钱已经付了。
+   修：`RemoteApi` 记录"上次请求是否 2xx"，`spentFailure()` 统一构造带钱的失败。
+2. **美元估算少算最多 5 倍。** `_perArticle` 按一篇一次调用算，开了检索一篇最多
+   `kMaxModelCalls` 次。界面 "12 篇约 $0.012" 实际可能 $0.06；`main.dart` 注释和
+   本文的 "60 篇最多 $0.60" 按 openai 5 次/篇是 $3.00。修：`researched` 参数取上限，
+   并在文案里说明这是天花板不是平均值。
+3. **关掉自动写开关停不住正在飞的那次。** `_write` 全函数体从未读 `_autoWrite`，
+   `AgentLoop.cancelled` 参数存在但生产构造点没传。开关在它唯一可被观察的
+   1~3 分钟窗口内完全无效。修：`cancelled: () => !_autoWrite`。
+4. **月度计数器非原子。** 月键和计数键两次独立写，中间进程死掉 →
+   `_mayAutoWrite` 读成"新月份，零次"→ **白送 60 篇**。且失败方向恒为"多给额度"。
+   修：新增 `repository.setSettings(Map)`，一次事务写两个键。
+
+**会坏/会骗人（5 个）**
+
+5. **书架按 title 建 map。** `library.dart` 的 `_ledger` 和 `shelf()` 的合并都按
+   title，同名文章互相覆盖 `reads`/`listens`/`kilobytes`/`goneReason`。
+   `recentTitles` 只是提示不是约束，撞题是时间问题。`mostRevisited` 同样把
+   两篇的 attention 相加。修：全部改按 `articleId`——账本本来就只用这个键。
+6. **`_write` 取锁后有个无保护的 `await`。** `main.dart` 的 reidentify 分支里
+   `saveQueue` 在 `_claimWrite()` 之后、第一个 `try` 之前。`SqliteException(5)`
+   真实发生过（`_boot` 的注释记录了），异常穿出 `_write` → `_writeClaim` 永真 →
+   所有写入死掉，只能重启。修：该分支包 try，并把整个 research 块也包上。
+7. **写满月后彻底静默。** 直接 return，全项目 41 处 Toast 无一与 ceiling 相关，
+   文档承诺的 "says so ONCE" 从未实现。修：`_sayCeilingReachedOnce()`，
+   "只一次"用 setting key 持久化（重启后还得只说一次），跨月自动清除；
+   Settings 行也显示 "full until next month"。
+8. **2MB 图片上限根本没被检查。** `PicturePack.of` 定义了 5 张和 2MB 两个约束却
+   **从未被调用**，`shrink.dart` 的 fallthrough 超限照样返回。一张 4MB 的图按
+   base64 全价上线路由。修：`of` 现在校验字节数，`_withPictures` 建 pack 并给人话。
+9. **花钱买的文章归档后永远打不开。** `loadArticle` 自 schema v3 加入起**零调用**，
+   `_openFromShelf` 只查队列 slot 和本会话 `_written`。正文明明在 `article_rows` 里。
+   修：补上第三条查询路径。
+
+**口径（2 个）**
+
+10. **`mayAutoWrite` 是死 getter 却被当成闸门。** 零调用，条件与实现相反。
+    `ARCHITECTURE.md` 写它 "gates code that would spend"，`check_invariants` 测它。
+    修：文档改指 `_mayAutoWrite`，getter 保留但标明"只表达不变量，非闸门"。
+11. **Settings 里 4 处关于钱的陈述与默认行为矛盾**（"nothing is generated on its
+    own, ever" / "What this app will not do: write on its own" / 两个 toast），
+    自动写默认开。另修：`_countListen` 无 try（DB 失败会中断自动续播）、
+    一个 `_working` 布尔管所有 pane 的测试按钮、`_loadAutoWriteUsed` 只在 boot 调。
+
+### 验证
+
+`check_invariants` 172 → **181**（新增 6 条：图片字节上限 3 条、同名文章两行 3 条）。
+`flutter analyze lib` 28 issues / **0 error**（与基线一致）。`flutter test` 8/8。

@@ -3,7 +3,7 @@ description: "No-Stop English — 三篇文章永远在等你。离线优先的�
 publish_to: "none"
 
 # The version is deliberately not a release train. Design v9 §4e.
-version: 0.4.0+10
+version: 0.4.0+11
 
 environment:
   sdk: ">=3.5.0 <4.0.0"

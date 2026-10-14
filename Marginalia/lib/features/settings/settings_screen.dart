@@ -29,6 +29,7 @@ import '../../core/widgets/texture.dart' show Hairline;
 import '../../data/audio.dart';
 import '../../data/remote/api.dart';
 import '../../data/remote/log.dart';
+import '../../domain/agent_budget.dart';
 import '../../domain/instruction.dart';
 import '../../domain/plan.dart';
 import 'plan_rewrite_sheet.dart';
@@ -287,9 +288,17 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late Pane _pane = widget.initialPane;
 
-  /// Set while a network call is in flight, so the pane can say "asking…" and the
-  /// button can refuse a second press rather than firing two requests.
-  bool _working = false;
+  /// Set while a network call is in flight, so the button that started it can
+  /// say "asking…" and refuse a second press rather than firing two requests.
+  ///
+  /// Keyed by WHICH button, because one boolean for all of them was a lie: it
+  /// disabled the Voice pane's "Play one word to test it" while the Who-writes
+  /// pane's "Test the key" was still running, with nothing at all being asked
+  /// of the voice. The reader saw a disabled button on a pane they had not
+  /// touched and could not clear it without navigating away and back.
+  final Set<String> _working = <String>{};
+
+  bool _busy(String what) => _working.contains(what);
 
   /// Null until the first read lands. Null is not zero — the hub says
   /// "reading…" rather than claiming the reader has saved nothing, which is a
@@ -703,7 +712,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (next == null || !mounted) return;
     widget.onPlanChanged(next);
-    Toast.show(context, 'plan saved · nothing is written until you tap Write it');
+    Toast.show(context, 'plan saved · nothing is written until a card asks for it');
   }
 
   String _valueOf(ReadingPlan p, PlanField f) => switch (f) {
@@ -903,7 +912,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     if (!mounted) return;
     widget.onPlanChanged(next);
-    Toast.show(context, 'saved · nothing is written until you tap Write it');
+    Toast.show(context, 'saved · nothing is written until a card asks for it');
   }
 
   // ── Voice ─────────────────────────────────────────────────────────────
@@ -963,9 +972,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 12),
           Btn(
-            label: _working ? 'Asking…' : 'Play one word to test it',
+            label: _busy('voice') ? 'Asking…' : 'Play one word to test it',
             primary: false,
-            onPressed: _working ? null : () => _probeVoice(),
+            onPressed: _busy('voice') ? null : () => _probeVoice(),
           ),
         ],
         const SizedBox(height: 16),
@@ -1051,7 +1060,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _probeVoice() async {
-    setState(() => _working = true);
+    setState(() => _working.add('voice'));
     // `finally`, not a plain await-then-reset. Every one of these calls reaches
     // the keystore and the network, and either can throw something the caller
     // did not anticipate; without the finally that throw left the button
@@ -1063,7 +1072,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       problem = 'the test could not run · $e';
     } finally {
-      if (mounted) setState(() => _working = false);
+      if (mounted) setState(() => _working.remove('voice'));
     }
     if (!mounted) return;
     Toast.show(
@@ -1269,8 +1278,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
             // endpoint actually selected. "12 of 60" on its own is a number
             // nobody can act on; "12 of 60 · about $0.01 so far" is a fact about
             // their own money.
+            //
+            // AND it says so when the month is full. The switch above stays ON,
+            // which is the reader's PREFERENCE and is still true; what this line
+            // reports is the FACT. A row that said "60 of 60" beside a switch
+            // that was on, with no toast and no change anywhere, was the app
+            // refusing to spend in total silence.
             value: '${m.autoWriteUsed} of ${m.autoWriteCeiling}'
-                '${m.autoWriteUsed == 0 ? ' · nothing yet' : ''}',
+                '${m.autoWriteUsed == 0 ? ' · nothing yet' : ''}'
+                '${m.autoWriteUsed >= m.autoWriteCeiling
+                    ? ' · full until next month'
+                    : ''}',
             onTap: () => _autoWriteInfo(context, m),
           ),
         ],
@@ -1289,9 +1307,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         const SizedBox(height: 12),
         Btn(
-          label: _working ? 'Asking…' : 'Test the key',
+          label: _busy('writer') ? 'Asking…' : 'Test the key',
           primary: false,
-          onPressed: _working || !m.writerKeySaved
+          onPressed: _busy('writer') || !m.writerKeySaved
               ? null
               : () => _testWriter(ep),
         ),
@@ -1467,12 +1485,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // build that error paints as a large blank box instead of a red one,
           // which is how it got as far as a screenshot: two cards, each with a
           // screenful of nothing under the text.
-          Btn(
-            label: _working ? 'Asking…' : testLabel,
-            primary: false,
-            dense: true,
-            onPressed: _working || !keySaved ? null : onTest,
-          ),
+          //
+          // Keyed by the card's own title, so the news test and the search test
+          // are two different buttons — as they are. One shared boolean made
+          // testing the news key disable the search key's button too, showing
+          // "Asking…" over a pane nothing was asking anything of.
+          Builder(builder: (BuildContext ctx) {
+            final bool busy = _busy(title);
+            return Btn(
+              label: busy ? 'Asking…' : testLabel,
+              primary: false,
+              dense: true,
+              onPressed: busy || !keySaved ? null : onTest,
+            );
+          }),
           const SizedBox(height: 7),
           Text(
             costLine,
@@ -1519,15 +1545,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Both tests go through the same "one tap, one sentence" shape as the
   /// writer test: the pane shows "Asking…", the button refuses a second press,
   /// and a thrown error becomes a sentence rather than a stuck button.
-  Future<void> _runProbe(Future<String?> Function() run, String ok) async {
-    setState(() => _working = true);
+  ///
+  /// [what] is the key the button is held under, and it is the CARD'S TITLE —
+  /// so the news test and the search test are separate buttons with separate
+  /// busy states, instead of one boolean that disabled whichever pane the
+  /// reader was not using.
+  Future<void> _runProbe(
+      String what, Future<String?> Function() run, String ok) async {
+    setState(() => _working.add(what));
     String? problem;
     try {
       problem = await run();
     } catch (e) {
       problem = 'the test could not run · $e';
     } finally {
-      if (mounted) setState(() => _working = false);
+      if (mounted) setState(() => _working.remove(what));
     }
     if (!mounted) return;
     Toast.show(
@@ -1538,11 +1570,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _testNews() => _runProbe(
+        'Zhihu Daily',
         widget.onTestNews,
         'the news source answered. Nothing was written.',
       );
 
   Future<void> _testSearch() => _runProbe(
+        'Web search',
         widget.onTestSearch,
         'the search source answered. Nothing was written.',
       );
@@ -1555,12 +1589,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// computed from the endpoint the reader selected, because a ceiling of 60 is
   /// $0.06 on MiMo and $0.60 on OpenAI and quoting it without saying which is
   /// quoting nothing.
+  ///
+  /// AND it is the CEILING figure when research is on, not the single-call one.
+  /// A researched article is up to `kMaxModelCalls` paid calls, so quoting one
+  /// call understated a reader's month by five times on the only screen where
+  /// they can decide whether to leave this on.
   Future<void> _autoWriteInfo(BuildContext context, SettingsModel m) async {
     final Palette c = context.colors;
     // Roughly what one article costs at the selected endpoint. Parsed out of the
     // endpoint's own cost line rather than kept as a second table of prices —
     // one number per endpoint, stated once.
-    final double perArticle = _perArticle(m.writerId);
+    //
+    // `_canResearch` in the shell is `_hasWriterKey && (_newsOn || _searchOn)`;
+    // the model carries the three halves, so the same rule is applied here
+    // rather than passed in as a fourth flag that could disagree with it.
+    final bool researched =
+        m.writerKeySaved && (m.newsOn || m.searchOn);
+    final double perArticle = _perArticle(m.writerId, researched: researched);
     await AppSheet.show<void>(
       context,
       title: 'Written by itself',
@@ -1610,7 +1655,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       '\$${(m.autoWriteUsed * perArticle).toStringAsFixed(3)} '
                       'at ${WriterEndpoint.byId(m.writerId).name}\'s rate. The '
                       'full month would be about '
-                      '\$${(m.autoWriteCeiling * perArticle).toStringAsFixed(2)}.',
+                      '\$${(m.autoWriteCeiling * perArticle).toStringAsFixed(2)}.'
+                      '${researched
+                          ? ' That is the ceiling, not the average: with the '
+                              'news and the search on, one article may take up '
+                              'to $kMaxModelCalls calls.'
+                          : ''}',
               style: TextStyle(
                 fontFamily: TypeScale.serif,
                 fontSize: 13.5,
@@ -1640,10 +1690,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Read off the endpoint's own cost line, which is where the price is already
   /// stated once. A second table of prices next to it would be the second copy
   /// of the truth, and the two would drift the first time an endpoint changed.
-  static double _perArticle(String writerId) {
+  ///
+  /// [researched] scales it by the loop's own hard limit, because the cost line
+  /// prices ONE call and a research run is up to `kMaxModelCalls` of them. The
+  /// sheet used to quote the single-call figure for a researched article, which
+  /// understated a reader's month by up to five times — and this is the only
+  /// number they have for deciding whether to leave automatic writing on.
+  ///
+  /// The multiplier is the ceiling and not the average: the loop may stop after
+  /// one call, and usually does. Quoting the ceiling means the figure is never
+  /// an UNDERSTATEMENT, which is the direction that matters when the number is
+  /// about somebody's money.
+  static double _perArticle(String writerId, {bool researched = false}) {
     final String line = WriterEndpoint.byId(writerId).costLine;
     final RegExpMatch? m = RegExp(r'\$([0-9.]+)').firstMatch(line);
-    return m == null ? 0 : (double.tryParse(m.group(1)!) ?? 0);
+    final double one = m == null ? 0 : (double.tryParse(m.group(1)!) ?? 0);
+    return researched ? one * kMaxModelCalls : one;
   }
 
   Future<void> _editWriterBase(WriterEndpoint ep) async {
@@ -1665,8 +1727,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context,
       title: 'API key',
       hint: 'paste the key',
-      note: "Stored in this phone's keystore. Writing only ever happens when "
-          'you tap Write it on a card — nothing is generated on its own, ever.',
+      note: "Stored in this phone's keystore. Writing happens when you tap "
+          'Write it on a card, or by itself when the switch below is on — '
+          'never on a timer and never in the background.',
       obscure: true,
       saveLabel: 'Save it on this phone',
     );
@@ -1675,7 +1738,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _testWriter(WriterEndpoint ep) async {
-    setState(() => _working = true);
+    setState(() => _working.add('writer'));
     // See _probeVoice: the finally is what keeps a thrown keystore or socket
     // error from pinning the button at "Asking…".
     String? problem;
@@ -1684,7 +1747,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       problem = 'the test could not run · $e';
     } finally {
-      if (mounted) setState(() => _working = false);
+      if (mounted) setState(() => _working.remove('writer'));
     }
     if (!mounted) return;
     Toast.show(
@@ -2122,7 +2185,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'ask whether you remember a word',
           'give you a streak, a score, or a percentage',
           'delete anything you read — freeing space only removes the file',
-          'schedule anything, or write on its own',
+          'write while you are not looking at it — no timer, no background task',
           'look a word up over the network',
         ])
           Padding(

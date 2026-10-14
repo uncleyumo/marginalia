@@ -340,12 +340,22 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// number from last month.
   int _autoWriteUsed = 0;
 
-  /// Read the counter. Called at boot and after every automatic write, so the
+  /// Read the counter. Called at boot and whenever Settings is opened, so the
   /// Settings row is a fact and not a memory.
+  ///
+  /// It used to run at boot only, so an app left open across the 1st kept
+  /// showing last month's "58 of 60" while the gate itself had already allowed a
+  /// fresh 60 — the number then jumped to "1 of 60" on the next write with no
+  /// explanation. Reading it on the way into Settings costs one query and means
+  /// the row can never disagree with the thing it is describing.
   Future<void> _loadAutoWriteUsed() async {
     try {
       final String? month = await _repo.setting(_autoMonthKey);
       if (month != _autoMonth()) {
+        // A new month. The counter starts again, and so does the one-shot
+        // ceiling notice — otherwise a reader who filled March would never be
+        // told about April.
+        if (month != null) await _save(_autoFullKey, '');
         if (!mounted) return;
         setState(() => _autoWriteUsed = 0);
         return;
@@ -1779,10 +1789,32 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // `a-sample-pointers` and every lookup preferred the bundle, so the reader
     // paid for an article they could never open. Mint a fresh id instead of
     // producing another shadowed write.
+    //
+    // AND GUARDED, because this `saveQueue` is the one write in `_write` that
+    // sits between the claim and the first `try`. A `SqliteException(5)`
+    // here — which this app has actually hit, see the note in `_boot` —
+    // propagated straight out of `_write`, so `_releaseWrite` was never
+    // reached and `_writeClaim` stayed `true` for the life of the process.
+    // Every later Write it then hit `!_claimWrite()` and said "another article
+    // is being written", and `_mayAutoWrite` refused to spend for the same
+    // reason. Nothing recovered it but a restart. A lock that a failed disk
+    // write can turn into a brick is the bug this project just finished fixing
+    // in another form, so it gets the same treatment: catch, put the card back,
+    // and hand the lock back.
     if (_samples.containsKey(slot.articleId)) {
-      q.reidentify(index, _freePlan().articleId);
-      await _repo.saveQueue(q);
-      slot = q.slots[index];
+      try {
+        q.reidentify(index, _freePlan().articleId);
+        await _repo.saveQueue(q);
+        slot = q.slots[index];
+      } catch (e) {
+        debugPrint('the slot could not be re-identified: $e');
+        _releaseWrite();
+        if (!mounted) return;
+        Toast.show(context,
+            'this phone could not update the queue · nothing was spent',
+            duration: const Duration(seconds: 6));
+        return;
+      }
     }
 
     final String? key = await _keys.writer();
@@ -1833,13 +1865,33 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // This is also where the cost line's honesty is decided: with no source
     // configured, `tools` comes out empty, no loop is built, and the write is
     // the single call the card promised.
-    final AgentLoop? agent = await _buildAgent(ep, key);
-    final List<NewsItem> news = _newsForThisWrite;
-    final List<String> recent = await _recentTitles();
-    final List<String> met = <String>[
-      for (final WordEntry w in _pool?.crucial(todayDay()) ?? const <WordEntry>[])
-        w.lemma,
-    ];
+    //
+    // WRAPPED ANYWAY, and not because any of it is expected to throw. The claim
+    // was taken at the top of this method and this block is still ahead of the
+    // first `try`, so an exception from ANY line here — a keystore that refuses,
+    // a database that is locked, a word pool that fails to decode — escapes
+    // `_write` entirely and leaves `_writeClaim` true for the life of the
+    // process. Every later write then says "another article is being written"
+    // and the automatic write refuses to spend, with no way back but a restart.
+    // One catch around the free work is far cheaper than that.
+    final AgentLoop? agent;
+    final List<NewsItem> news;
+    final List<String> recent;
+    final List<String> met;
+    try {
+      agent = await _buildAgent(ep, key);
+      news = _newsForThisWrite;
+      recent = await _recentTitles();
+      met = <String>[
+        for (final WordEntry w
+            in _pool?.crucial(todayDay()) ?? const <WordEntry>[])
+          w.lemma,
+      ];
+    } catch (e) {
+      debugPrint('the research could not be assembled: $e');
+      _failWrite(q, index, 'nothing was written · the sources would not answer');
+      return;
+    }
     if (!mounted) {
       _releaseWrite();
       return;
@@ -1987,8 +2039,14 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// 60 is three a day for a full month, which is more than this queue can hold
   /// — the queue is three cards, so the app can only ever be one write behind.
   /// The number is a CEILING against a runaway bug, not a budget a reader is
-  /// expected to reach: at the most expensive endpoint configured (~$0.01 an
-  /// article) the whole month is $0.60, and at MiMo's ~$0.001 it is $0.06.
+  /// expected to reach.
+  ///
+  /// The dollar figures below are the CEILING per article — one paid call — and
+  /// they understate a month on which research is configured, because a
+  /// researched article is up to `kMaxModelCalls` of them. At the most expensive
+  /// endpoint configured that is $3.00 rather than $0.60. Settings states the
+  /// researched figure; this comment states the same one so the two cannot
+  /// quietly disagree.
   ///
   /// When it is reached the app stops and says so ONCE. It does not retry, it
   /// does not ask again every launch, and it does not spend a cent more until
@@ -2028,7 +2086,21 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       final String? month = await _repo.setting(_autoMonthKey);
       final String? count = await _repo.setting(_autoCountKey);
       final int used = month == _autoMonth() ? (int.tryParse(count ?? '') ?? 0) : 0;
-      if (used >= kAutoWriteMonthlyCeiling) return false;
+      if (used >= kAutoWriteMonthlyCeiling) {
+        // THE SENTENCE THAT WAS MISSING. The app refused to spend and said
+        // nothing at all: the switch stayed ON, the row still said "60 of 60",
+        // and a reader who had just flipped it on watched nothing happen and
+        // concluded the app was broken. Every other refusal in this app has a
+        // toast — no key, pictures refused, a write in flight, the last-one
+        // guard — because a silent refusal reads as a dead button.
+        //
+        // ONCE, and "once" has to survive a restart, which an in-memory bool
+        // cannot. The flag is a setting key, so a reader who relaunches into a
+        // full month is not told again. It is cleared when the month turns, so
+        // next month's first full day gets its one sentence.
+        await _sayCeilingReachedOnce();
+        return false;
+      }
     } catch (e) {
       // Unreadable counter: do not spend. The failure mode of a wrong "0" is a
       // month of articles; the failure mode of a wrong "full" is a reader who
@@ -2039,15 +2111,50 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     return true;
   }
 
+  /// Tell the reader the month is full, and only once.
+  ///
+  /// The "once" is a setting key rather than a field because it has to survive a
+  /// restart: a reader who relaunches into a full month must not be told again
+  /// what they were told yesterday. It is stamped with the month it belongs to,
+  /// so the next month's first full day gets its sentence back.
+  static const String _autoFullKey = 'auto:fullFor';
+
+  Future<void> _sayCeilingReachedOnce() async {
+    try {
+      final String month = _autoMonth();
+      if (await _repo.setting(_autoFullKey) == month) return;
+      await _save(_autoFullKey, month);
+      if (!mounted) return;
+      Toast.show(
+        context,
+        'the automatic write has done its $kAutoWriteMonthlyCeiling for this '
+            'month · your cards still write when you tap them',
+        duration: const Duration(seconds: 7),
+      );
+    } catch (e) {
+      debugPrint('the ceiling notice could not be recorded: $e');
+    }
+  }
+
   /// Count one automatic write. Called only after the article landed.
+  ///
+  /// TWO KEYS, ONE WRITE. These used to be two independent `setSetting` calls
+  /// with nothing between them, and a process that died in that gap left the
+  /// month stamped and the count stale — which `_mayAutoWrite` reads as "a new
+  /// month, so zero used", quietly handing back a full 60. `_save` also
+  /// swallowed its own failure, so the toast said "· auto" for a write that was
+  /// never counted at all. Both keys now go in one transaction, and a failure
+  /// propagates so the caller can stop claiming the write was counted.
   Future<void> _countAutoWrite() async {
     try {
       final String month = _autoMonth();
       final String? stored = await _repo.setting(_autoMonthKey);
       final int used =
           stored == month ? (int.tryParse(await _repo.setting(_autoCountKey) ?? '') ?? 0) : 0;
-      await _save(_autoMonthKey, month);
-      await _save(_autoCountKey, '${used + 1}');
+      await _repo.setSettings(<String, String>{
+        _autoMonthKey: month,
+        _autoCountKey: '${used + 1}',
+      });
       if (!mounted) return;
       setState(() => _autoWriteUsed = used + 1);
     } catch (e) {
@@ -2127,7 +2234,22 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       _closeSources();
       return null;
     }
-    return AgentLoop(endpoint: ep, apiKey: writerKey, tools: tools);
+    // The switch is read LIVE, on every iteration of the loop, through the
+    // `cancelled` hook the loop already had and nobody passed. Turning
+    // automatic writing off used to do nothing at all to a write already in the
+    // air: `_write` never looked at `_autoWrite`, so a reader who flipped the
+    // switch to stop the spending watched the article land a minute later, saw
+    // the "· auto" toast, and found one more unit of the month gone. The switch
+    // was ineffective for exactly the minute it was most likely to be used.
+    //
+    // What this does NOT do is refund the calls already made — the loop can only
+    // decline the NEXT one. That is the honest limit and the toast says so.
+    return AgentLoop(
+      endpoint: ep,
+      apiKey: writerKey,
+      tools: tools,
+      cancelled: () => !_autoWrite,
+    );
   }
 
   /// Everything opened for one write, closed when it finishes. A list rather
@@ -2242,7 +2364,24 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       setState(() {});
     }
 
-    await _write(q, index, pictures: req.pictures);
+    // The pack is built HERE, and this is the only place in the app that builds
+    // one. `PicturePack.of` is the object that enforces the two ceilings — five
+    // pictures and 2 MB — and it was never called by anything, so a picture the
+    // shrinker could not get under 2 MB went to the wire at full base64 price.
+    // The ceiling is stated in the docs as an executable invariant; this line is
+    // what makes that true.
+    //
+    // The refusal is a sentence and not a crash: a reader holding a panorama
+    // needs to be told which picture is too big, not shown a dead screen.
+    final List<Picture> packed;
+    try {
+      packed = PicturePack.of(req.pictures).pictures;
+    } on StateError catch (e) {
+      Toast.show(context, '$e · pick a smaller one', duration: const Duration(seconds: 6));
+      return;
+    }
+
+    await _write(q, index, pictures: packed);
   }
 
   /// Which intent a stored instruction describes, if any.
@@ -2360,12 +2499,28 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// Listening counts as a LISTEN and never as a read. Conflating them would put
   /// a number on the shelf the reader did not earn by reading, and they would
   /// have no way to tell.
+  /// GUARDED, like [_countRead] and unlike what this used to be.
+  ///
+  /// `_repo.countListen` was awaited with no `try` at all, and both callers are
+  /// unawaited. A database failure therefore produced an unhandled async error
+  /// with nothing on screen, `_listensInAll` never updated — and in
+  /// `_onListenFinished` the exception aborted the method BEFORE the
+  /// auto-continue block, so one failed count silently stopped the commute run.
+  /// `_countRead` has had this guard the whole time; the two methods are the
+  /// same shape and only one of them was defended.
   Future<void> _countListen(Article a) async {
-    await _repo.countListen(
-      articleId: a.id,
-      title: a.title,
-      day: todayDay(),
-    );
+    try {
+      await _repo.countListen(
+        articleId: a.id,
+        title: a.title,
+        day: todayDay(),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {});
+      Toast.show(context, 'that listen could not be counted · $e');
+      return;
+    }
     if (!mounted) return;
     Toast.show(context, 'counted a listen. reads untouched.');
     setState(() {});
@@ -2865,7 +3020,18 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// opened nothing, which is the worst of both: the app claims an action it did
   /// not take. A row the reader cannot open is a row that only exists to be
   /// looked at, so it opens — or, if its bytes are gone, says why not.
-  void _openFromShelf(ShelfRow row, Queue q) {
+  ///
+  /// THREE places a body can live, and the third one is the one that was
+  /// missing. A bundled sample carries its own text; an article written in THIS
+  /// session is in `_written`; an article written in an EARLIER session is only
+  /// in `article_rows`. `loadArticle` has existed since schema v3 and was never
+  /// called by anything, so a paid article the reader archived with
+  /// "Done with it" — its slot long since reused — hit the last line and got
+  /// "that one is not in the queue right now". The body was on the phone the
+  /// whole time. The comment below used to claim the body is "only in memory for
+  /// what this session wrote", which stopped being true the moment `landArticle`
+  /// started writing it to disk.
+  Future<void> _openFromShelf(ShelfRow row, Queue q) async {
     if (row.isGone) {
       Toast.show(context,
           'the text of that one was freed · its ${row.reads}× read count stands');
@@ -2877,10 +3043,9 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         return;
       }
     }
-    // In the ledger but no longer in the queue: the body is only in memory for
-    // what this session wrote, so say the fact rather than opening an empty page.
+    // Written this session: still in memory.
     final Article? written = _written[row.articleId];
-    if (written != null) {
+    if (written != null && written.sentences.isNotEmpty) {
       setState(() {
         _openId = written.id;
         _openFromLibrary = true;
@@ -2889,7 +3054,24 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       });
       return;
     }
-    Toast.show(context, 'that one is not in the queue right now');
+    // Written in an EARLIER session: on disk, and one query away.
+    try {
+      final Article? stored = await _repo.loadArticle(row.articleId);
+      if (!mounted) return;
+      if (stored != null && stored.sentences.isNotEmpty) {
+        setState(() {
+          _openId = stored.id;
+          _openFromLibrary = true;
+          _listeningOn = false;
+          _tab = Dest.article;
+        });
+        return;
+      }
+    } catch (e) {
+      debugPrint('the stored body of ${row.articleId} could not be read: $e');
+      if (!mounted) return;
+    }
+    Toast.show(context, 'the text of that one is no longer on this phone');
   }
 
   /// Invariant 4's user-facing half. The sheet states the trade in the reader's
@@ -3074,6 +3256,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// instructions" link uses it, because a reader who tapped that link asked for
   /// the manager and would rather not be shown the hub and made to find it.
   Widget _settings({Pane pane = Pane.hub}) {
+    // Re-read the counter on the way in. The row is the only place the reader
+    // can see how much of the month is left, and a number that is only correct
+    // at boot is a number that is wrong for most of the time it is on screen.
+    unawaited(_loadAutoWriteUsed());
     return SettingsScreen(
       initialPane: pane,
       model: SettingsModel(
@@ -3244,6 +3430,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         // turned this on is looking at a queue with a planned card in it, and
         // the moment they flip the switch is the moment they want it to start —
         // not the next time they happen to finish an article.
+        //
+        // And if the month is already full, `_maybeAutoWrite` will say so
+        // through `_sayCeilingReachedOnce`. That is the difference between a
+        // switch that does nothing and a switch that explains itself: flipping
+        // it on into a full month used to be completely silent, and the reader
+        // had no way to tell a disabled feature from a broken one.
         if (on) unawaited(_maybeAutoWrite());
       },
 

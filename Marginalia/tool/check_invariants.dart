@@ -114,6 +114,13 @@ void main() {
   check('a planned slot is detected', cost.hasPlannedSlot);
 
   // The gate is on AUTOMATIC writing. An explicit tap is always honoured.
+  //
+  // NOTE WHICH GETTER THIS IS. `mayAutoWrite` states an invariant about the
+  // queue — a plan waiting means the app waits too — but it is NOT the gate the
+  // app spends behind. That is `_ShellState._mayAutoWrite`, which is four
+  // conditions and reads `nextPlanned != null`, the inverse of this one. This
+  // check is here to keep the queue's own rule honest; it is not a check that
+  // money cannot leave the phone.
   check('automatic writing is blocked while a plan waits', !cost.mayAutoWrite);
   check('and autoFill refuses to top the queue up', () {
     cost.autoFill(() => _planned('auto'));
@@ -493,6 +500,51 @@ void main() {
   check('storage formats in KB', formatKb(412) == '412 KB');
   check('and in MB past 1024', formatKb(2048) == '2.0 MB');
 
+  // ── the shelf is keyed by ARTICLE ID, and a title collision is not a merge ──
+  //
+  // This section exists because the shelf was keyed by TITLE until 0.4.0+11,
+  // and that was the most destructive defect in this file. Two articles the
+  // writer happened to give the same name collapsed into one row: the second
+  // overwrote the first's reads, listens, kilobytes and goneReason, silently and
+  // permanently. Nothing warned anybody.
+  //
+  // It is not a corner case either. The writer picks its own subject,
+  // `recentTitles` is a hint rather than a constraint, and a reader who asks for
+  // the same thing twice is doing the one thing this app is FOR.
+  section('derived: two articles may share a title, and must stay two rows');
+  final Library collide = Library(
+    ledger: <LedgerEntry>[
+      LedgerEntry(articleId: 'dup-1', title: 'The Same Title',
+          reads: 7, listens: 1, kilobytes: 300),
+      LedgerEntry(articleId: 'dup-2', title: 'The Same Title',
+          reads: 2, listens: 4, kilobytes: 500),
+    ],
+    queue: Queue(<QueueSlot>[]),
+  );
+  final List<ShelfRow> dupes = collide.shelf();
+  check('two same-titled articles are two rows', dupes.length == 2,
+      'got ${dupes.length}');
+  check('and neither overwrote the other',
+      dupes.any((ShelfRow r) => r.articleId == 'dup-1' && r.reads == 7) &&
+          dupes.any((ShelfRow r) => r.articleId == 'dup-2' && r.listens == 4));
+  check('and both keep their own size', collide.usedKb == 800,
+      'got ${collide.usedKb}');
+  check('search finds both, not one', collide.search('Same Title', LibraryFilter.all).length == 2,
+      'got ${collide.search('Same Title', LibraryFilter.all).length}');
+
+  // The same defect in "most revisited": attention was SUMMED across every
+  // article sharing a title, so one heavily-read piece made another look read.
+  final Revisited dupRev = Revisited(<DayLogRow>[
+    DayLogRow(day: '2026-10-01', articleId: 'd1', title: 'Twin', reads: 5, listens: 0),
+    DayLogRow(day: '2026-10-02', articleId: 'd2', title: 'Twin', reads: 3, listens: 0),
+  ]);
+  final List<DayLogRow> twin = dupRev.mostRevisited();
+  check('two same-titled articles are two rows there too', twin.length == 2,
+      'got ${twin.length}');
+  check('and their attention is not summed',
+      twin.any((DayLogRow r) => r.articleId == 'd1' && r.reads == 5) &&
+          twin.any((DayLogRow r) => r.articleId == 'd2' && r.reads == 3));
+
   // ── derived: most revisited comes from the day rows ───────────────────
   section('derived: most revisited is a GROUP BY, not a stored total');
   final Revisited rev = Revisited(<DayLogRow>[
@@ -789,6 +841,29 @@ void main() {
     for (int i = 0; i < 5; i++) _pic(1),
   ]).length == 5);
   check('an empty pack is empty', PicturePack.empty().isEmpty);
+
+  // THE BYTE CEILING, which was declared, documented as "the ceiling", and
+  // enforced by nothing until 0.4.0+11. `shrink.dart`'s last fallthrough
+  // returns a picture that is still over it when no quality setting fits, and
+  // `_withPictures` handed that straight to `_write` — so a 4 MB photograph
+  // reached the wire and was billed at its full base64 size.
+  //
+  // This check exists because the ARCHITECTURE doc claimed both numbers were
+  // "checked as executable invariants, not trusted", and one of them was a
+  // comment. A ceiling nobody enforces is not a ceiling.
+  bool overCeilingRefused = false;
+  String? ceilingMessage;
+  try {
+    PicturePack.of(<Picture>[_pic(kMaxPictureBytes + 1)]);
+  } on StateError catch (e) {
+    overCeilingRefused = true;
+    ceilingMessage = '$e';
+  }
+  check('a picture over 2 MB is refused, not sent', overCeilingRefused);
+  check('and the refusal names the limit',
+      ceilingMessage != null && ceilingMessage.contains('$kMaxPictureBytes'));
+  check('while one exactly at 2 MB is accepted',
+      PicturePack.of(<Picture>[_pic(kMaxPictureBytes)]).length == 1);
 
   // base64 makes a picture 4/3 bigger on the wire, and a price on screen has to
   // be the price that was charged — so the number the reader is quoted is the

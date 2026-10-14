@@ -101,6 +101,15 @@ class Picture {
 /// A value object rather than a bare `List<Picture>` because the count is a rule
 /// and not an accident: [kMaxPictures] is enforced here, once, so no caller can
 /// build a seven-picture instruction by forgetting a check.
+///
+/// The BYTE ceiling is enforced here too, and until 0.4.0+11 it was not
+/// enforced anywhere at all. `kMaxPictureBytes` was declared, documented as
+/// "the ceiling", and read by nothing — `shrink.dart`'s last fallthrough returns
+/// a picture that is still over it, and `_withPictures` handed that straight to
+/// `_write`. A 4 MB photograph therefore reached the wire and was billed at its
+/// full base64 size, on the one path in this app that costs the most per
+/// request. `ARCHITECTURE.md` claimed "both numbers are checked as executable
+/// invariants"; one of them was a comment.
 class PicturePack {
   const PicturePack._(this.pictures);
 
@@ -112,6 +121,13 @@ class PicturePack {
       throw StateError(
           'an instruction carries at most $kMaxPictures pictures, never more; '
           'got ${list.length}');
+    }
+    for (final Picture p in list) {
+      if (p.bytes.length > kMaxPictureBytes) {
+        throw StateError(
+            'a picture may not exceed $kMaxPictureBytes bytes after resizing; '
+            'this one is ${p.bytes.length}');
+      }
     }
     return PicturePack._(List<Picture>.unmodifiable(list));
   }

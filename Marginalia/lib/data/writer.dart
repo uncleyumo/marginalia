@@ -1,9 +1,13 @@
 // Writing an article — the one path in this app that costs money.
 //
-// It is reachable from exactly one place: a tap on a planned card's Write it.
-// There is no timer, no WorkManager, no background task, and no call on app
-// launch. `Queue.mayAutoWrite` exists so that no future code path can widen
-// this one by accident.
+// It is reachable from two kinds of place and no others: a tap on a planned
+// card's Write it, and the app's own automatic write. There is no timer, no
+// WorkManager, no background task, and no call on app launch. The automatic
+// entry point is `_ShellState._maybeAutoWrite`, and everything that would let
+// it widen is gathered in `_ShellState._mayAutoWrite` — which is the gate, and
+// the only one. `Queue.mayAutoWrite` looks like a gate and is not: it reads
+// `!hasPlannedSlot`, which is the inverse of what the app does, and it has no
+// callers.
 //
 // Everything the model returns is treated as untrusted. The word count and the
 // reading time are COMPUTED from the text that came back, never read out of the
@@ -358,13 +362,21 @@ reader paid for. Take the idea or the vocabulary and write something new.
   /// Parse the answer. Throws [RemoteFailure] rather than returning a half-built
   /// article: a card that shows a title with no body is worse than an error,
   /// because it looks like something the app wrote on purpose.
+  ///
+  /// EVERY failure here is thrown about a response that already came back 2xx,
+  /// and on the agent path that is after two to five PAID calls — `parse` runs
+  /// after `agent.run()` returns (`write`, line 212). So each of these carries
+  /// the money with it via `_api.spentFailure`, rather than defaulting to
+  /// `spent: false` and telling the reader nothing was spent about an article
+  /// they had paid for. That sentence was the single worst thing this app could
+  /// say, and it was saying it on exactly the path that costs the most.
   Article parse(
     String raw, {
     required String articleId,
   }) {
     final Object? decoded = _decode(raw);
     if (decoded is! Map) {
-      throw const RemoteFailure(
+      throw _api.spentFailure(
           'The writer answered in a shape this app cannot read. Nothing was '
           'saved.');
     }
@@ -372,7 +384,7 @@ reader paid for. Take the idea or the vocabulary and write something new.
     final Object? title = decoded['title'];
     final Object? rawSentences = decoded['sentences'];
     if (title is! String || title.trim().isEmpty || rawSentences is! List) {
-      throw const RemoteFailure(
+      throw _api.spentFailure(
           'The writer answered without an article in it. Nothing was saved.');
     }
 
@@ -388,7 +400,7 @@ reader paid for. Take the idea or the vocabulary and write something new.
       ));
     }
     if (sentences.isEmpty) {
-      throw const RemoteFailure(
+      throw _api.spentFailure(
           'The writer answered with no sentences. Nothing was saved.');
     }
 
@@ -566,11 +578,12 @@ Rules:
   /// The one thing that IS an error: no usable json at all. There is nothing to
   /// show and nothing to fall back to but the old plan, and silently returning
   /// the old plan would make the sheet say "no changes" about a call that
-  /// failed. That is the same lie as a card that shows a title with no body.
+  /// failed. That is the same lie as a card that shows a title with no body —
+  /// and it is a lie about a paid call, so it carries the money too.
   ReadingPlan _planFrom(String raw, ReadingPlan old) {
     final Object? decoded = _decode(raw);
     if (decoded is! Map) {
-      throw const RemoteFailure(
+      throw _api.spentFailure(
           'The writer answered in a shape this app cannot read. Your plan was '
           'not touched.');
     }

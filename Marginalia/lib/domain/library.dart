@@ -108,21 +108,35 @@ class Library {
   Library({
     required Iterable<LedgerEntry> ledger,
     required Queue queue,
-  })  : _ledger = {for (final LedgerEntry e in ledger) e.title: e},
+  })  : _ledger = {for (final LedgerEntry e in ledger) e.articleId: e},
         _queue = queue;
 
   final Map<String, LedgerEntry> _ledger;
   final Queue _queue;
 
-  /// shelf() = LEDGER ∪ live QUEUE, keyed by title.
+  /// shelf() = LEDGER ∪ live QUEUE, keyed by **article id**.
   ///
-  /// A queued article merges into an existing ledger row rather than replacing
-  /// it, so the counts do not restart when an article re-enters the queue.
+  /// It used to be keyed by TITLE, and that was the most destructive bug in this
+  /// file: two articles the writer happened to give the same name collapsed into
+  /// one row, with the second silently overwriting the first's reads, listens,
+  /// kilobytes and goneReason. Nothing warned anybody. The writer is free to
+  /// pick its own subject and `recentTitles` is a hint rather than a
+  /// constraint, so a collision is not a corner case — it is a matter of time.
+  ///
+  /// `articleId` is the key every other query in the app already uses
+  /// (`repository.dart` addresses the ledger by it exclusively), and it is the
+  /// key `freeSpace` writes to. A shelf keyed by anything else is a second
+  /// addressing scheme, and this project's whole argument is that there is
+  /// exactly one.
+  ///
+  /// A queued article still merges into its own ledger row rather than replacing
+  /// it, so the counts do not restart when an article re-enters the queue. That
+  /// is the same guarantee as before; only the key changed.
   List<ShelfRow> shelf() {
     final Map<String, ShelfRow> seen = <String, ShelfRow>{};
 
     for (final LedgerEntry e in _ledger.values) {
-      seen[e.title] = ShelfRow(
+      seen[e.articleId] = ShelfRow(
         articleId: e.articleId,
         title: e.title,
         keywords: e.keywords,
@@ -139,7 +153,7 @@ class Library {
     for (final QueueSlot slot in _queue.slots) {
       final Article? a = slot.article;
       if (a == null) continue; // planned: there is nothing to shelve yet
-      final ShelfRow existing = seen[a.title] ??
+      final ShelfRow existing = seen[a.id] ??
           ShelfRow(
             articleId: a.id,
             title: a.title,
@@ -152,7 +166,7 @@ class Library {
             isLive: false,
             isGone: false,
           );
-      seen[a.title] = ShelfRow(
+      seen[a.id] = ShelfRow(
         articleId: existing.articleId.isEmpty ? a.id : existing.articleId,
         title: a.title,
         // The live article wins: it is in memory, it was written by the writer
@@ -229,14 +243,17 @@ class Revisited {
 
   final List<DayLogRow> _rows;
 
+  /// Keyed by article id, not title. Two articles the writer happened to give
+  /// the same name used to have their attention SUMMED into one row here, which
+  /// is the same defect the shelf had — see the note on [Library.shelf].
   List<DayLogRow> mostRevisited({int limit = 4}) {
     final Map<String, DayLogRow> merged = <String, DayLogRow>{};
     for (final DayLogRow r in _rows) {
-      final DayLogRow m = merged[r.title] ??
+      final DayLogRow m = merged[r.articleId] ??
           DayLogRow(day: r.day, articleId: r.articleId, title: r.title);
       m.reads += r.reads;
       m.listens += r.listens;
-      merged[r.title] = m;
+      merged[r.articleId] = m;
     }
     final List<DayLogRow> list = merged.values.toList()
       ..removeWhere((DayLogRow r) => r.reads + r.listens == 0)

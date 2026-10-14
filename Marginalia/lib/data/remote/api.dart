@@ -271,6 +271,26 @@ class RemoteApi {
 
   final http.Client _client;
 
+  /// Whether the most recent request got a 2xx back.
+  ///
+  /// This field exists because of the one sentence the app must never get wrong:
+  /// "nothing was spent". A provider that answers `200 OK` and then a body this
+  /// app cannot read HAS charged for that request — the model ran, the tokens
+  /// were counted, the invoice was written. Every failure downstream of a 2xx
+  /// therefore has to say the money left, and until this existed none of them
+  /// did: `RemoteFailure.spent` defaulted to `false` and the reader was told
+  /// "nothing was written and nothing was spent" about a call they had paid for.
+  ///
+  /// It is a FIELD and not a parameter for one reason: the 2xx is received in
+  /// `_post` and the failure is thrown two frames later, in `_text`, `_object`
+  /// or `ArticleWriter.parse` — none of which has the response in hand by the
+  /// time it needs to describe what went wrong.
+  ///
+  /// Set at exactly one place (the 2xx check in `_post`) and read at exactly
+  /// one place (`_spentFailure`). Cleared at the START of each `_post`, so a
+  /// failed request cannot make the next one look paid for.
+  bool _lastRequestWasPaid = false;
+
   /// Measured, not chosen: a real 180-word article with its Chinese took 72 s
   /// from MiMo, and a 500-word one is about three times that. The old value was
   /// 60 s, which cut off working calls — and a timeout on a call that was going
@@ -400,28 +420,31 @@ class RemoteApi {
       what: 'speaking a sentence',
     );
 
+    // EVERY failure from here down is thrown after a 2xx, so every one of them
+    // has to be able to say the provider charged for the request. That is what
+    // `_spentFailure` is for — see the note on `_lastRequestWasPaid`.
     final Map<String, dynamic> body = _object(res, what: 'speaking a sentence');
     final Object? choices = body['choices'];
     if (choices is! List || choices.isEmpty) {
-      throw const RemoteFailure('MiMo returned no audio. Nothing was spoken.');
+      throw spentFailure('MiMo returned no audio. Nothing was spoken.');
     }
     final Object? first = choices.first;
     if (first is! Map) {
-      throw const RemoteFailure('MiMo returned an audio block nobody can read.');
+      throw spentFailure('MiMo returned an audio block nobody can read.');
     }
     final Object? message = first['message'];
     if (message is! Map) {
-      throw const RemoteFailure('MiMo returned no message with the audio in it.');
+      throw spentFailure('MiMo returned no message with the audio in it.');
     }
     final Object? audio = message['audio'];
     if (audio is! Map || audio['data'] is! String) {
-      throw const RemoteFailure(
+      throw spentFailure(
           'MiMo accepted the key but sent no audio. The voice name may be wrong.');
     }
     try {
       return base64Decode(audio['data']! as String);
     } catch (_) {
-      throw const RemoteFailure('The audio arrived damaged and was discarded.');
+      throw spentFailure('The audio arrived damaged and was discarded.');
     }
   }
 
@@ -451,6 +474,8 @@ class RemoteApi {
       throw const RemoteFailure('No key is saved, so nothing was sent.');
     }
     http.Response res;
+    // A new attempt starts unpaid, whatever the last one did.
+    _lastRequestWasPaid = false;
     try {
       res = await _client
           .post(
@@ -494,9 +519,29 @@ class RemoteApi {
       throw RemoteFailure('Could not reach the provider — check your '
           'connection, then try again.');
     }
-    if (res.statusCode >= 200 && res.statusCode < 300) return res;
+    // A 2xx is a request the provider ACCEPTED AND CHARGED FOR. Everything
+    // thrown after this line — an unreadable body, an empty choices array, a
+    // parse failure — must be able to say so, which is why the flag is set
+    // here rather than at each of those sites.
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      _lastRequestWasPaid = true;
+      return res;
+    }
     throw RemoteFailure(_explain(res, what));
   }
+
+  /// A failure thrown after a 2xx, with the money already counted.
+  ///
+  /// The whole point of A1: without this, `spent` defaulted to `false` and the
+  /// reader was told "nothing was written and nothing was spent" about a
+  /// request the provider had already billed.
+  ///
+  /// PUBLIC because the last three readers of a response live one layer up:
+  /// `ArticleWriter.parse` and `ArticleWriter._planFrom` both fail on a body
+  /// that arrived with a 2xx, and neither of them has the response in hand by
+  /// the time it needs to describe what went wrong.
+  RemoteFailure spentFailure(String message) =>
+      RemoteFailure(message, spent: _lastRequestWasPaid);
 
   /// Turn an HTTP status into a sentence a reader can act on.
   ///
@@ -543,11 +588,14 @@ class RemoteApi {
     return raw.length <= 160 ? raw : '${raw.substring(0, 160)}…';
   }
 
+  // Both of these are called with a response that ALREADY returned 2xx — see
+  // `_post`. The provider ran the model and billed for it; a body this app
+  // cannot read is not a request that cost nothing.
   String _text(http.Response res, {required String what}) {
     final Map<String, dynamic> body = _object(res, what: what);
     final Object? choices = body['choices'];
     if (choices is! List || choices.isEmpty) {
-      throw RemoteFailure(
+      throw spentFailure(
           'The provider answered, but returned nothing for: $what.');
     }
     final Object? first = choices.first;
@@ -563,9 +611,9 @@ class RemoteApi {
       final Object? decoded = jsonDecode(res.body);
       if (decoded is Map<String, dynamic>) return decoded;
     } catch (_) {
-      throw RemoteFailure('The provider\'s answer ($what) was not json at all.');
+      throw spentFailure('The provider\'s answer ($what) was not json at all.');
     }
-    throw RemoteFailure('The provider\'s answer ($what) was empty.');
+    throw spentFailure('The provider\'s answer ($what) was empty.');
   }
 
   void close() => _client.close();

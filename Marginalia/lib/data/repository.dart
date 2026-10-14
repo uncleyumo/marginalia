@@ -1101,6 +1101,27 @@ class LibraryRepository {
         );
   }
 
+  /// Several settings, or none of them.
+  ///
+  /// The automatic-write counter is TWO keys — the month it belongs to and the
+  /// number of writes in it — and they were written one after the other with
+  /// nothing holding them together. A process that died in that gap left the
+  /// month stamped and the count stale, and the reader of that pair interprets
+  /// that as "a new month, therefore zero used" and quietly hands back a full
+  /// month of articles. Two keys that are only meaningful together are one
+  /// write, and the failure direction of a non-atomic pair is always towards
+  /// spending more, which is the direction this app refuses to fail in.
+  Future<void> setSettings(Map<String, String> entries) async {
+    if (entries.isEmpty) return;
+    await db.transaction(() async {
+      for (final MapEntry<String, String> e in entries.entries) {
+        await db.into(db.settingsRows).insertOnConflictUpdate(
+              SettingsRowsCompanion.insert(key: e.key, value: e.value),
+            );
+      }
+    });
+  }
+
   /// The plan's list fields are stored as json text. A real table would let the
   /// two drift apart, and a plan whose `avoid` list is half-migrated is a plan
   /// that silently stops protecting the reader.

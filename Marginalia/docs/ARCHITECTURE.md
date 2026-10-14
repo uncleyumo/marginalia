@@ -48,8 +48,8 @@ The five invariants live in these types, not in comments:
 1. The queue is exactly three slots.
 2. A slot is `planned` or `ready`. There is no third state and no `finished`.
 3. A slot being `planned` stops automatic writing, and nothing stops a tap.
-   `mayAutoWrite` gates code that would spend without a tap; `writeSlot` is
-   reachable only by one.
+   `_ShellState._mayAutoWrite` gates code that would spend without a tap;
+   `Queue.writeSlot` is reachable only by one.
 4. Reading counts and never removes. `listens` never touches `reads`.
 5. Freeing space changes `kb` and nothing else — counts survive deletion.
 
@@ -60,6 +60,20 @@ article — an app that refused the only tap it has would be an app that can
 never spend a cent, which is not what "a deliberate, affordable action" means.
 The two halves are kept apart in the code so that neither can quietly become
 the other.
+
+**The gate is `_mayAutoWrite`, and it is four conditions.** The reader left it
+on; there is a planned card to write; nothing is already in flight; the month is
+not full. A missing key is deliberately NOT one of them — a reader with no key
+gets nothing spent and no toast, because the queue page already says a key is
+needed on every planned card and a toast about it on every launch is noise.
+
+`Queue.mayAutoWrite` is NOT that gate and does not call it. It reads
+`!hasPlannedSlot`, which was the condition under an earlier design where the
+app wrote only once all three cards had been read — the exact inverse of what
+shipped. It has no callers. It is kept because it still states a true invariant
+about the queue, and `tool/check_invariants.dart` checks it as one, but nobody
+should read it as the thing standing between the reader and a surprise: that is
+`_mayAutoWrite`, and only that.
 
 `tool/check_invariants.dart` runs these as a program. It is a program and not a
 `test/` file on purpose: `dart test` cannot start on this machine (native-asset
@@ -175,7 +189,12 @@ Four decisions worth knowing before changing any of it:
 - **The ceiling is 2 MB and the cap is 5 pictures** (`domain/picture.dart`). A
   12 MP photo is ~4 MB, and five of those base64'd is a 27 MB request body that
   several providers refuse *before charging anything*. Both numbers are checked
-  as executable invariants, not trusted.
+  as executable invariants, not trusted — and until 0.4.0+11 only the COUNT was.
+  `PicturePack.of` is the one place both live, and nothing called it, so a
+  picture the shrinker could not get under 2 MB went to the wire at full base64
+  price. `_withPictures` now builds the pack before it calls `_write`, and
+  `check_invariants.dart` refuses an over-ceiling picture directly. A ceiling
+  nobody enforces is a comment.
 - **A file already under the ceiling is passed through untouched.** Re-encoding a
   200 KB screenshot to save nothing is work that makes the picture worse and
   saves nothing.
@@ -329,6 +348,32 @@ than pretending otherwise. The guarantee is narrower and worth stating exactly:
 **a paid article either lands completely or leaves nothing behind to clean up.**
 The failure path in `_write` puts the card back to tappable and says both halves
 out loud — the money was spent, and nothing landed.
+
+### And the app never claims money it did not spend
+
+The other half of "careful with money" is the sentence the reader is shown when
+something fails. Until 0.4.0+11 that sentence was wrong in one specific and
+expensive way: `RemoteFailure.spent` defaulted to `false`, and every failure
+thrown *after* a 2xx left it at the default. A provider that answers `200 OK` and
+then a body this app cannot read **has charged for that request** — so
+`_text`, `_object`, the four `ArticleWriter.parse` failures and `_planFrom` all
+told the reader "nothing was written and nothing was spent" about calls they had
+paid for. The agent loop got it right (`spent: _spent`, seven sites); the fast
+path and the parser did not.
+
+`RemoteApi` now records whether the last request got a 2xx and every post-2xx
+failure is built through `spentFailure`, so the clause is derived from what
+actually happened rather than from a default. The rule this establishes is worth
+keeping: **a failure is only allowed to say "nothing was spent" if no request
+reached the provider, or every request that did was answered with a non-2xx.**
+
+Two related honesty fixes came with it. The dollar figure in Settings is now the
+CEILING per article when research is configured (`kMaxModelCalls` calls, not one)
+— the old number understated a reader's month by five times on the one screen
+where they decide whether to leave automatic writing on. And the monthly counter
+is written as one transaction, because two independent writes let a process dying
+between them stamp a new month with an old count, which reads as "zero used" and
+quietly hands back a full 60.
 
 ## Design tokens
 

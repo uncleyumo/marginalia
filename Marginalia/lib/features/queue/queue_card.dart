@@ -151,28 +151,18 @@ class QueueCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          // The words, not a colour: this card has cost nothing.
-          //
-          // While a write is in flight the line says the opposite, because by
-          // then it is no longer true — the call has gone out and the money is
-          // committed. DESIGN's rule is that a price on screen must be the real
-          // one, and that applies to this sentence as much as to the number on
-          // the button.
-          //
-          // Wrapped, not a Row with one Text. On a 1080px screen at 480dpi the
-          // card is about 300dp wide, and this line is 47 characters of mono —
-          // it did not fit and threw a RenderFlex overflow by 87px. The words
-          // matter more than the single line they were written on.
+          // Two words, not a paragraph. The price is on the button below —
+          // `Write it · ~$0.002` — and repeating it here in prose was a second
+          // copy of a fact that can only drift from the first. What this line
+          // has to say is the STATE: not written yet, or writing right now.
           Text(
-            writing
-                ? 'writing · the call is in flight · it has been paid for'
-                : 'planned · not written yet · nothing has been paid for',
+            writing ? 'writing…' : 'not written yet',
             style: TextStyle(
               fontFamily: TypeScale.mono,
               fontSize: 10,
               height: 1.5,
               letterSpacing: 0.02,
-              color: c.verm,
+              color: writing ? c.verm : c.ink3,
             ),
           ),
           // What the card is GOING to be. Without this the reader picks a

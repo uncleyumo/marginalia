@@ -3,8 +3,12 @@ description: "No-Stop English — 三篇文章永远在等你。离线优先的�
 publish_to: "none"
 
 # The version is deliberately not a release train. Design v9 §4e.
-version: 0.4.0+11
-
+#
+# The BUILD NUMBER is not hand-edited: run `dart tool/bump_version.dart` before
+# every delivery. Settings reads `versionName`/`versionCode` from the Android
+# package manager — what is installed, not what this file says — so two builds
+# sharing a number make that line stop answering the one question it exists for.
+version: 0.4.0+12
 environment:
   sdk: ">=3.5.0 <4.0.0"
 

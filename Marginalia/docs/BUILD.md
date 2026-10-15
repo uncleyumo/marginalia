@@ -94,16 +94,27 @@ debug 下是红框报错，release 下渲染成一大片白，看起来像「卡
 
 ### 改版本号
 
-`pubspec.yaml` 第 6 行：
+`pubspec.yaml` 第 11 行：
 
 ```yaml
-version: 0.2.0+2      # versionName+versionCode
+version: 0.4.0+11      # versionName+versionCode
 ```
 
-**每次交付都改一下 build number**（`+2` → `+3`）。Settings 页最底下会显示
-`version 0.2.0 (2)`，这是从 Android 包管理器读的 `versionName` / `versionCode`，
-也就是**设备上真正装着的那一个**——快速迭代时用来确认「手机跑的是不是我刚打的那个包」。
-版本号不变的话，这一行就分不出两个不同的构建。
+**每次交付前跑一次这个**，别手改：
+
+```bash
+dart tool/bump_version.dart
+# → 0.4.0+12  (was 0.4.0+11)
+```
+
+它只动 build number（`+11` → `+12`），不动语义版本号，同时把
+`android/local.properties` 里 Flutter 自己缓存的那两行一起刷掉。
+`--quiet` 可以关掉输出。
+
+Settings 页最底下会显示 `version 0.4.0 (12)`，这是从 Android 包管理器读的
+`versionName` / `versionCode`，也就是**设备上真正装着的那一个**——快速迭代时用来确认
+「手机跑的是不是我刚打的那个包」。版本号不变的话，这一行就分不出两个不同的构建，
+而手改这件事漏一次就成了一个上午的困惑。
 
 ### 打包命令与产物
 

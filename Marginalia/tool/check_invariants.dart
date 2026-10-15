@@ -21,6 +21,7 @@ import '../lib/domain/models.dart';
 import '../lib/domain/picture.dart';
 import '../lib/domain/plan.dart';
 import '../lib/domain/queue.dart';
+import '../lib/domain/sequence.dart';
 import '../lib/domain/word_pool.dart';
 import '../lib/data/remote/api.dart';
 
@@ -72,6 +73,28 @@ QueueSlot _planned(String id) => QueueSlot(
 
 Queue _queueWithTwoReadyOnePlanned() =>
     Queue(<QueueSlot>[_ready('a1'), _ready('a2'), _planned('a3')]);
+
+/// A ring over `(id, lastSeenDay, attention)` triples, which is everything the
+/// listening order needs from a shelf row.
+ListenSequence _ringOf(Iterable<(String, String, int)> rows) {
+  return ListenSequence(<SequenceEntry>[
+    for (final (String id, String day, int attention) in rows)
+      SequenceEntry(
+        articleId: id,
+        title: 'title-$id',
+        lastSeenDay: day,
+        attention: attention,
+      ),
+  ]);
+}
+
+/// Two entries at the SAME attention, for the tie-order check. The titles are
+/// what breaks the tie, and the check is that both comparators break it the
+/// same way.
+final SequenceEntry _tieA =
+    SequenceEntry(articleId: 'x', title: 'alpha', lastSeenDay: '', attention: 2);
+final SequenceEntry _tieB =
+    SequenceEntry(articleId: 'y', title: 'beta', lastSeenDay: '', attention: 2);
 
 void main() {
   print('Marginalia — invariant checks');
@@ -388,6 +411,118 @@ void main() {
       !_isDayString('22:14'));
   check('todayDay() yields a day string with no time part',
       _isDayString(todayDay(DateTime(2026, 10, 6, 22, 14))));
+
+  // ── derived data: the listening run ───────────────────────────────────
+  //
+  // The run is a RING over the whole shelf, and the two things that must never
+  // regress are (a) it never runs out while anything is speakable, and (b) a
+  // direction steps rather than re-picks. Both were the bug: the picker saw
+  // only the three live slots, so a run stopped after three articles.
+  section('derived: the listening run is a ring, and it does not stop');
+  final ListenSequence ring = _ringOf(<(String, String, int)>[
+    ('a1', '2026-10-01', 0),
+    ('a2', '2026-10-02', 3),
+    ('a3', '2026-10-03', 7),
+    ('a4', '2026-10-04', 1),
+    ('a5', '2026-10-05', 0),
+  ]);
+
+  check('the ring holds everything the shelf had', ring.length == 5,
+      'got ${ring.length}');
+  check('an empty ring is empty, not an error',
+      ListenSequence(const <SequenceEntry>[]).isEmpty);
+
+  // ONWARD steps toward what has waited LONGEST. a5 is newest (10-05), a1 is
+  // oldest (10-01), so onward from the middle goes to the lower-numbered one.
+  final ListenSequence on3 = ring.on('a3');
+  check('onward from the middle goes to what waited longer',
+      on3.next(ListenOrder.onward, '2026-10-06') == 'a2',
+      'got ${on3.next(ListenOrder.onward, '2026-10-06')}');
+  final ListenSequence on2 = ring.on('a2');
+  check('onward keeps stepping', on2.next(ListenOrder.onward, '2026-10-06') == 'a1');
+
+  // BACKWARD is the mirror: toward what arrived LAST.
+  check('backward from the middle goes to what arrived later',
+      on3.next(ListenOrder.backward, '2026-10-06') == 'a4',
+      'got ${on3.next(ListenOrder.backward, '2026-10-06')}');
+  final ListenSequence on4 = ring.on('a4');
+  check('backward keeps stepping',
+      on4.next(ListenOrder.backward, '2026-10-06') == 'a5');
+
+  // AND IT WRAPS. This is the whole point: the run does not stop.
+  check('onward wraps at the oldest end — a1 hands back to a5',
+      ring.on('a1').next(ListenOrder.onward, '2026-10-06') == 'a5');
+  check('backward wraps at the newest end — a5 hands back to a1',
+      ring.on('a5').next(ListenOrder.backward, '2026-10-06') == 'a1');
+
+  // THE RUN NEVER RETURNS NULL while anything is speakable. Twenty steps
+  // around a five-entry ring must produce five articles, not nothing.
+  String? walker = 'a3';
+  final Set<String> spoke = <String>{};
+  for (int i = 0; i < 20; i++) {
+    final String? nextId = ring.on(walker!).next(ListenOrder.onward, '2026-10-06');
+    check('step $i has somewhere to go', nextId != null,
+        'the ring ran dry at step $i');
+    if (nextId == null) break;
+    spoke.add(nextId);
+    walker = nextId;
+  }
+  check('twenty steps around a five-entry ring heard all five',
+      spoke.length == 5, 'heard ${spoke.length}');
+
+  // A single article is a run of one, and replaying it beats stopping.
+  final ListenSequence solo = _ringOf(<(String, String, int)>[('only', '2026-10-01', 0)]);
+  check('a ring of one still has a next', solo.next(ListenOrder.onward, '2026-10-06') == 'only');
+
+  // THE STUDY ORDERS re-ask rather than step, so they may repeat an article —
+  // but they must still always answer, and never with the article already
+  // playing.
+  //
+  // Attention: a1=0, a2=3, a3=7, a4=1, a5=0. From a3 the highest is a2 and the
+  // lowest is a1.
+  check('most studied picks the highest attention first',
+      ring.on('a3').next(ListenOrder.mostStudied, '2026-10-06') == 'a2',
+      'got ${ring.on('a3').next(ListenOrder.mostStudied, '2026-10-06')}');
+  check('least studied picks the lowest attention first',
+      ring.on('a3').next(ListenOrder.leastStudied, '2026-10-06') == 'a1',
+      'got ${ring.on('a3').next(ListenOrder.leastStudied, '2026-10-06')}');
+  check('and a study order never answers with the article playing',
+      ring.on('a3').next(ListenOrder.mostStudied, '2026-10-06') != 'a3' &&
+          ring.on('a3').next(ListenOrder.leastStudied, '2026-10-06') != 'a3');
+
+  // A TIE IS A TIE, in both directions. a1 and a5 are both at zero attention;
+  // the comparator orders them by title, and only the attention is inverted
+  // between the two orders — so whichever comes first for `mostStudied` also
+  // comes first for `leastStudied`. Reversing the whole comparator instead
+  // would swap two equally-met articles around for no reason a reader could
+  // name.
+  check('a tie is ordered the same way by both study orders',
+      SequenceEntry.byMostStudied(_tieA, _tieB) < 0 &&
+          SequenceEntry.byLeastStudied(_tieA, _tieB) < 0);
+
+  // Every order, from every starting article, has an answer.
+  for (final ListenOrder o in ListenOrder.values) {
+    for (final String id in <String>['a1', 'a2', 'a3', 'a4', 'a5']) {
+      check('${o.name} from $id always answers',
+          ring.on(id).next(o, '2026-10-06') != null);
+    }
+  }
+  check('random still answers when everything was met today',
+      ring.on('a1').next(ListenOrder.random, '2026-10-01') != null);
+  check('random skips today when anything else exists',
+      ring.on('a1').next(ListenOrder.random, '2026-10-05') != 'a5',
+      'a5 was met today and should not be drawn');
+
+  // The legacy names map to the directions they used to mean. A reader who
+  // saved `newest` before the rename must not have their commute reversed.
+  check('the legacy `newest` maps to backward',
+      ListenOrder.fromKey('newest') == ListenOrder.backward);
+  check('the legacy `oldest` maps to onward',
+      ListenOrder.fromKey('oldest') == ListenOrder.onward);
+  check('an unknown name falls back to onward',
+      ListenOrder.fromKey('nonsense') == ListenOrder.onward);
+  check('every order has a label and a hint',
+      ListenOrder.values.every((ListenOrder o) => o.label.isNotEmpty && o.hint.isNotEmpty));
 
   // ── derived data: the shelf ───────────────────────────────────────────
   section('derived: the shelf is a union, not a second copy');

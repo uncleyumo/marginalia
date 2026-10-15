@@ -200,6 +200,7 @@ class LedgerEntry {
     this.kilobytes = 0,
     this.goneReason,
     this.freedKilobytes = 0,
+    this.lastSeenDay = '',
   });
 
   final String articleId;
@@ -234,6 +235,14 @@ class LedgerEntry {
 
   /// Non-null when the bytes are gone. The row stays either way.
   GoneReason? goneReason;
+
+  /// `YYYY-MM-DD`, the day this article was last written or read.
+  ///
+  /// Carried because the listening run has to be able to say which article is
+  /// NEWER, and this column is the only place that fact is stored. Empty on
+  /// rows that predate it; those are the oldest thing in the table, which is
+  /// the honest answer.
+  final String lastSeenDay;
 
   bool get isGone => goneReason != null;
 

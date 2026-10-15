@@ -32,6 +32,7 @@ import '../../data/remote/log.dart';
 import '../../domain/agent_budget.dart';
 import '../../domain/instruction.dart';
 import '../../domain/plan.dart';
+import '../../domain/sequence.dart';
 import 'plan_rewrite_sheet.dart';
 
 enum Pane {
@@ -461,22 +462,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'Debug log',
           AgentLog.instance.isEmpty
               ? 'nothing written yet'
-              : '${AgentLog.instance.groups().length} thing${AgentLog.instance.groups().length == 1 ? '' : 's'} asked for · '
-                  'tap to see what happened',
+              : '${AgentLog.instance.groups().length} thing${AgentLog.instance.groups().length == 1 ? '' : 's'} asked for',
           widget.onOpenDebugLog,
         ),
         const SizedBox(height: 20),
-        Text(
-          'Nothing here is required. The app works with every one of these at '
-          'its default.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13.5,
-            height: 1.65,
-            color: c.ink3,
-          ),
-        ),
-        const SizedBox(height: 18),
         Hairline(color: c.hair),
         const SizedBox(height: 12),
         // The build stamp, in mono, at the very bottom of the hub.
@@ -576,17 +565,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         // different question from the five above: WHAT to write, then HOW LONG.
         const SizedBox(height: 22),
         const SectionLabel('Length'),
-        Text(
-          'What "short", "medium" and "long" mean, in words. The queue picks '
-          'one at random when it plans an article, and you can ask for a '
-          'particular one — or an exact number — from a card\'s ⋯ menu.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13,
-            height: 1.6,
-            color: c.ink3,
-          ),
-        ),
         const SizedBox(height: 10),
         for (final PlanField f in PlanField.lengths)
           _FieldRow(
@@ -595,17 +573,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onTap: () => _editField(f),
           ),
         const SizedBox(height: 8),
-        Text(
-          'The recommendations are $kShortWords / $kMediumWords / $kLongWords. '
-          'You are not being asked how many words to mark — the writer decides '
-          'that, and the app measures what it decided.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 12.5,
-            height: 1.6,
-            color: c.ink3,
-          ),
-        ),
         const SizedBox(height: 18),
         Btn(
           label: 'Edit my own words',
@@ -791,7 +758,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: 'My own words',
       hint: 'Anything a field cannot hold',
       note: 'Sent to the writer exactly as written, on top of every field '
-          'above. Editing a field never eats this.',
+          'above.',
       initial: m.plan.raw,
     );
     if (v == null || !mounted) return;
@@ -1011,8 +978,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context,
       title: 'Base URL',
       hint: VoiceEndpoint.mimo.baseUrl,
-      note: 'The address requests go to, and the only address your key is ever '
-          'sent to. Change it only if your provider gave you a different one.',
+      note: 'The address requests go to. Change it only if your provider gave '
+          'you a different one.',
       initial: m.voiceBase,
       mono: true,
       saveLabel: 'Save',
@@ -1027,8 +994,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: 'MiMo API key',
       hint: 'paste the key',
       note: "Stored in this phone's keystore and only ever sent to the address "
-          'above. There is no server in this version, so there is nothing that '
-          'could see it.',
+          'above.',
       obscure: true,
       saveLabel: 'Save it on this phone',
     );
@@ -1048,10 +1014,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final List<String>? v = await ChipPickerSheet.ask(
       context,
       title: 'Voice',
-      note: 'MiMo publishes no list to fetch, so these are the built-in names. '
-          'One of them speaks a word and you hear whether you like it. '
-          'Random picks one narrator per article, and keeps it for that whole '
-          'piece.',
+      note: 'Random picks one narrator per article, and keeps it for that '
+          'whole piece.',
       initial: <String>[m.voiceName],
       presets: names,
     );
@@ -1108,35 +1072,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       padding: const EdgeInsets.fromLTRB(Gap.gutter, 18, Gap.gutter, 30),
       children: <Widget>[
         Text('Listening', style: context.texts.titleLarge),
-        const SizedBox(height: 4),
-        Text(
-          'What the listening screen does on its own. Every default here is '
-          'the quiet one — nothing starts, nothing continues, newest first.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13,
-            height: 1.6,
-            color: c.ink3,
-          ),
-        ),
-
         const SizedBox(height: 20),
         const SectionLabel('Start playing when I open Listen'),
-        Text(
-          'The default waits for a tap. A screen that talks first surprises '
-          'people in quiet places — a library, a late train, a shared desk — '
-          'and the tap it costs to start is small.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13,
-            height: 1.6,
-            color: c.ink3,
-          ),
-        ),
         const SizedBox(height: 12),
         _Choice(
           title: 'Wait for me to tap Play',
-          sub: 'silent until you ask — the default',
+          sub: 'silent until you ask',
           selected: !m.listenAutoPlay,
           onTap: () => widget.onListenAutoPlay(false),
         ),
@@ -1163,7 +1104,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             color: c.ink,
           ),
         ),
-        const SizedBox(height: 6),
         Text(
           'Change it on the Listen screen, under the play button.',
           style: TextStyle(
@@ -1176,48 +1116,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
         const SizedBox(height: 22),
         const SectionLabel('Pick the next one by'),
-        for (final (String value, String title, String sub)
-            in <(String, String, String)>[
-              (
-                'newest',
-                'Newest first',
-                'the card that arrived most recently',
-              ),
-              ('oldest', 'Oldest first', 'the card that has waited longest'),
-              (
-                'mostStudied',
-                'Most studied',
-                'what you have met most — review first',
-              ),
-              (
-                'leastStudied',
-                'Least studied',
-                'what you have met least — fresh first',
-              ),
-              ('random', 'Random, not today\'s', 'a shuffle, with one exception'),
-            ]) ...<Widget>[
+        // Built from the enum rather than a literal list, so a new order cannot
+        // exist without appearing here — and the label and hint are the enum's
+        // own, which is the only way the two cannot drift apart.
+        for (final ListenOrder order in ListenOrder.values) ...<Widget>[
           _Choice(
-            title: title,
-            sub: sub,
-            selected: m.listenAutoOrder == value,
-            onTap: () => widget.onListenAutoOrder(value),
+            title: order.label,
+            sub: order.hint,
+            selected: m.listenAutoOrder == order.key,
+            onTap: () => widget.onListenAutoOrder(order.key),
           ),
           const SizedBox(height: 8),
         ],
-        Text(
-          'Random avoids an article already heard today when anything else '
-          'exists — the repeat is the one that gets skipped.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 12.5,
-            height: 1.6,
-            color: c.ink3,
-          ),
-        ),
       ],
     );
   }
-
   // ── Who writes ────────────────────────────────────────────────────────
 
   Widget _writer(Palette c) {
@@ -1357,26 +1270,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         Hairline(color: c.hair),
         const SizedBox(height: 18),
         const SectionLabel('Sources the writer may consult'),
-        Text(
-          'Optional, both of them. With neither set the writer works from what '
-          'it already knows, in one call. With one set it can read before it '
-          'writes, which costs a little more and takes a little longer — and '
-          'the card says so before you tap.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13,
-            height: 1.65,
-            color: c.ink3,
-          ),
-        ),
         const SizedBox(height: 16),
 
         _sourceCard(
           c,
           title: 'Zhihu Daily',
-          body: 'A daily list of thirty stories. The writer may pick one and '
-              'read it, then write its own English article about the subject — '
-              'not a translation of it.',
+          body: 'A daily list of thirty stories. The writer may read one before '
+              'it writes.',
           keySaved: m.newsKeySaved,
           on: m.newsOn,
           onToggle: widget.onNewsToggled,

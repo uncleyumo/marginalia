@@ -32,12 +32,18 @@ class DayCell {
 
 class RevisitedRow {
   const RevisitedRow({
+    required this.articleId,
     required this.title,
     required this.reads,
     required this.listens,
   });
 
+  /// The ledger's key. A row the reader can see has to be a row they can open,
+  /// and a title is not an address — two articles may share one.
+  final String articleId;
+
   final String title;
+
   final int reads;
   final int listens;
 
@@ -53,6 +59,7 @@ class HistoryScreen extends StatelessWidget {
     required this.cells,
     required this.mostRevisited,
     required this.onOpenDay,
+    required this.onOpenArticle,
     required this.onBack,
   });
 
@@ -66,6 +73,11 @@ class HistoryScreen extends StatelessWidget {
   final List<DayCell> cells;
   final List<RevisitedRow> mostRevisited;
   final void Function(int day) onOpenDay;
+
+  /// Open one article straight from a history row. The calendar answers "what
+  /// did I do that day"; this answers "let me read that one again" without a
+  /// detour through the shelf.
+  final void Function(String articleId) onOpenArticle;
 
   /// The header label is a button, so it needs somewhere to go.
   final VoidCallback onBack;
@@ -94,16 +106,6 @@ class HistoryScreen extends StatelessWidget {
           const SizedBox(height: 22),
           const Eyebrow('History · only ever looked at'),
           Text('You read on these days', style: context.texts.titleLarge),
-          const SizedBox(height: 4),
-          Text(
-            'Nothing here can be marked, scored or undone.',
-            style: TextStyle(
-              fontFamily: TypeScale.serif,
-              fontSize: 13,
-              fontStyle: FontStyle.italic,
-              color: c.ink3,
-            ),
-          ),
           const SizedBox(height: 20),
           _calendar(context, c),
           const SizedBox(height: 26),
@@ -120,7 +122,8 @@ class HistoryScreen extends StatelessWidget {
               ),
             )
           else
-            ...mostRevisited.map((RevisitedRow r) => _revisitRow(c, r)),
+            ...mostRevisited
+                .map((RevisitedRow r) => _revisitRow(c, r)),
         ],
       ),
     );
@@ -256,30 +259,46 @@ class HistoryScreen extends StatelessWidget {
   ///
   /// The bars are engraved rather than filled so they read as a record rather
   /// than a progress meter — there is nothing here to make progress against.
+  ///
+  /// TAPPABLE, and that is the whole point of the row: "which one did I keep
+  /// coming back to?" is answered by its name, and the next question is always
+  /// "let me read it again". A list of titles you then have to go and hunt for
+  /// in the Library is a list that answered half a question.
   Widget _revisitRow(Palette c, RevisitedRow r) {
     final int max = mostRevisited.isEmpty ? 1 : mostRevisited.first.touches;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: <Widget>[
-          Expanded(
-            child: Text(
-              r.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: TypeScale.serif,
-                fontSize: 14.5,
-                color: c.ink,
-              ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(9),
+        child: InkWell(
+          onTap: () => onOpenArticle(r.articleId),
+          borderRadius: BorderRadius.circular(9),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 3),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    r.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: TypeScale.serif,
+                      fontSize: 14.5,
+                      color: c.ink,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                _bar(c, r.reads, max, c.jade, '${r.reads}×'),
+                const SizedBox(width: 6),
+                _bar(c, r.listens, max, c.lamp, '${r.listens}×'),
+              ],
             ),
           ),
-          const SizedBox(width: 10),
-          _bar(c, r.reads, max, c.jade, '${r.reads}×'),
-          const SizedBox(width: 6),
-          _bar(c, r.listens, max, c.lamp, '${r.listens}×'),
-        ],
+        ),
       ),
     );
   }
@@ -329,13 +348,18 @@ class DaySheet extends StatelessWidget {
     required this.listens,
     required this.articles,
     required this.minutes,
+    required this.onOpenArticle,
   });
 
   final String label;
   final int reads;
   final int listens;
-  final List<({String title, int reads, int listens})> articles;
+  final List<({String articleId, String title, int reads, int listens})>
+      articles;
   final int minutes;
+
+  /// Open one of this day's articles. Same address the revisit list uses.
+  final void Function(String articleId) onOpenArticle;
 
   @override
   Widget build(BuildContext context) {
@@ -374,50 +398,58 @@ class DaySheet extends StatelessWidget {
               ),
             )
           else
-            for (final ({String title, int reads, int listens}) a in articles)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 9),
-                child: Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: Text(
-                        a.title,
-                        style: TextStyle(
-                          fontFamily: TypeScale.serif,
-                          fontSize: 14.5,
-                          color: c.ink,
-                        ),
-                      ),
-                    ),
-                    if (a.reads > 0)
-                      Text('read ${a.reads}×',
-                          style: TextStyle(
-                            fontFamily: TypeScale.mono,
-                            fontSize: 10.5,
-                            color: c.ink3,
-                          )),
-                    if (a.listens > 0)
-                      Text('heard ${a.listens}×',
-                          style: TextStyle(
-                            fontFamily: TypeScale.mono,
-                            fontSize: 10.5,
-                            color: c.ink3,
-                          )),
-                  ],
+            for (final ({String articleId, String title, int reads,
+                  int listens}) a in articles)
+              _dayArticleRow(c, a),
+        ],
+      ),
+    );
+  }
+
+  /// One of the day's articles. Tappable, for the same reason the revisit list
+  /// is: the reader asked what they did that day, and the obvious next step is
+  /// to do it again.
+  Widget _dayArticleRow(
+    Palette c,
+    ({String articleId, String title, int reads, int listens}) a,
+  ) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(9),
+      child: InkWell(
+        onTap: () => onOpenArticle(a.articleId),
+        borderRadius: BorderRadius.circular(9),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 3),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  a.title,
+                  style: TextStyle(
+                    fontFamily: TypeScale.serif,
+                    fontSize: 14.5,
+                    color: c.ink,
+                  ),
                 ),
               ),
-          const SizedBox(height: 14),
-          Text(
-            'Recorded, not graded. An article stays in the queue after you '
-            'read it once, so coming back here is how you find it again.',
-            style: TextStyle(
-              fontFamily: TypeScale.serif,
-              fontSize: 13,
-              height: 1.65,
-              color: c.ink3,
-            ),
+              if (a.reads > 0)
+                Text('read ${a.reads}×',
+                    style: TextStyle(
+                      fontFamily: TypeScale.mono,
+                      fontSize: 10.5,
+                      color: c.ink3,
+                    )),
+              if (a.listens > 0)
+                Text('heard ${a.listens}×',
+                    style: TextStyle(
+                      fontFamily: TypeScale.mono,
+                      fontSize: 10.5,
+                      color: c.ink3,
+                    )),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

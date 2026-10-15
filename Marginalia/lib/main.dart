@@ -49,6 +49,7 @@ import 'domain/models.dart';
 import 'domain/picture.dart';
 import 'domain/plan.dart';
 import 'domain/queue.dart';
+import 'domain/sequence.dart';
 import 'domain/word_pool.dart';
 import 'features/article/article_screen.dart';
 import 'features/article/listen_screen.dart';
@@ -319,8 +320,16 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   int _listenAutoContinueCount = 3;
 
   /// How the next article is picked when auto-continue fires.
-  /// `newest` · `oldest` · `mostStudied` · `leastStudied` · `random`.
-  String _listenAutoOrder = 'newest';
+  ///
+  /// `onward` (the default) steps toward what has waited longest, `backward`
+  /// toward what arrived last. Both WRAP, so a run does not stop at the end of
+  /// the ring. The other three are re-asked each time rather than stepped, so
+  /// they can repeat an article before the run has been all the way round.
+  ListenOrder _listenOrder = ListenOrder.onward;
+
+  /// The stored name of [_listenOrder]. Kept in step with it, because the
+  /// preference is a string on disk and the order is an enum in memory.
+  String get _listenAutoOrder => _listenOrder.key;
 
   /// Whether the app writes the next article by itself.
   ///
@@ -605,15 +614,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
           : 'off';
       _listenAutoContinueCount = int.tryParse(lcontN ?? '') ?? 3;
       if (_listenAutoContinueCount < 1) _listenAutoContinueCount = 1;
-      _listenAutoOrder = <String>{
-        'newest',
-        'oldest',
-        'mostStudied',
-        'leastStudied',
-        'random',
-      }.contains(lorder)
-          ? lorder!
-          : 'newest';
+      // The stored name maps through the enum, which owns the legacy names.
+      // `newest` was the old default and is not a direction — it meant "the
+      // card that arrived most recently", which is now `backward`'s job — so a
+      // reader who never touched this setting gets `onward`: the newest thing in
+      // the queue is the thing they have not met, which is what a queue is for.
+      _listenOrder = ListenOrder.fromKey(lorder);
       _writerId = endpoint.id;
       // The two appearance preferences are resolved here and handed UP to the
       // app root, which owns the theme. Stored by NAME rather than by index, so
@@ -1163,33 +1169,6 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         const SizedBox(height: 20),
         const Eyebrow('Queue · 3 waiting'),
         Text('Three waiting', style: context.texts.titleLarge),
-        const SizedBox(height: 4),
-        // HONEST ABOUT WHAT HAPPENS WHEN YOU FINISH ONE.
-        //
-        // This line used to promise "the next is written at once", which was
-        // then true of nothing: there was no timer, no background task and no
-        // write anywhere but a tap, and `mayAutoWrite` guarded a path that did
-        // not exist. A reader who read three articles, watched nothing change,
-        // and had been told the next one arrives "at once" had been lied to by
-        // the one screen that promises nothing else.
-        //
-        // Since 0.4.0 the sentence is true, and the sentence is now about what
-        // is still true underneath it: reading never takes anything away, and
-        // the write costs exactly what the card says and not a cent more. The
-        // automatic write is described where the reader turned it on — in
-        // Settings, on the switch itself — rather than repeated here, because a
-        // footnote is where a promise goes to be ignored.
-        Text(
-          'Read in any order, or just listen. What you have read stays where it '
-          'is — writing an article costs what the card says, and nothing is '
-          'spent unless you or the automatic write ask for it.',
-          style: TextStyle(
-            fontFamily: TypeScale.serif,
-            fontSize: 13,
-            height: 1.6,
-            color: context.colors.ink3,
-          ),
-        ),
         const SizedBox(height: 18),
         // The prototype's order: the cards, then the notice, then the aside.
         // The notice comes AFTER the list because it is a footnote about sound,
@@ -1264,7 +1243,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
             const SizedBox(height: 4),
             Text(
               slot.isPlanned
-                  ? 'planned · not written yet · nothing has been paid for'
+                  ? 'not written yet'
                   : (slot.article?.sentences.isEmpty ?? true)
                       ? 'written, but the text is no longer on this phone'
                       : <String>[
@@ -1295,12 +1274,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
               // express "same idea, shorter", which is the thing a reader
               // actually wants — so the topic, the lens and the length became
               // one question, asked once.
-              _menuRow('Change it', 'what it is about, and how long · free',
-                  () async {
+              _menuRow('Change it', 'free', () async {
                 Navigator.of(ctx).pop();
                 await _changeIt(q, index);
               }),
-              _menuRow('Draw another plan', 'free · no input needed', () async {
+              _menuRow('Draw another plan', 'free', () async {
                 Navigator.of(ctx).pop();
                 _reroll(q, index);
               }),
@@ -1333,26 +1311,22 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
               // asks what the NEW piece should be (subject, instruction, length),
               // then retires the old article — free, into the library, counts
               // intact, and never counted as a read — and only then pays.
-              _menuRow('Write a new one',
-                  'choose the subject · the old one is kept', () async {
+              _menuRow('Write a new one', 'the old one is kept', () async {
                 Navigator.of(ctx).pop();
                 await _writeAgain(q, index);
               }),
-              // The subtitle used to be `shelve it — this is not a read`, which
-              // is true and useless: it answers a question nobody had. The
-              // question a reader actually has, looking at a card they finished,
-              // is "if I say done, do I lose it?" — so this says what happens to
-              // the ARTICLE (kept, in the library, reopenable) and what happens
-              // to the SLOT (a free plan takes it). Two facts, one line.
+              // The subtitle answers the one question a reader has, looking at a
+              // card they finished: "if I say done, do I lose it?" Two facts,
+              // one line — what happens to the ARTICLE (kept, reopenable) and
+              // what happens to the SLOT (a free plan takes it).
               //
               // This row stays available on an article that has been read.
               // Reading is not being done with something — the app's whole
               // position is that a read-through is a beginning — so a reader who
               // has read this twice may still want it out of the way, and the
-              // card now shows `read 2×` right above this menu so the choice is
-              // an informed one.
-              _menuRow('Done with it',
-                  'kept in your library · the slot gets a free plan', () async {
+              // card shows `read 2×` right above this menu so the choice is an
+              // informed one.
+              _menuRow('Done with it', 'kept in your library', () async {
                 Navigator.of(ctx).pop();
                 await _doneWithIt(q, index);
               }, danger: true),
@@ -1459,6 +1433,90 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     setState(() {});
     Toast.show(context,
         '${retired.title} is in your library · not counted as a read');
+  }
+
+  /// Heard or read all the way through: the card becomes a plan, and something
+  /// unread is guaranteed to be waiting.
+  ///
+  /// WHY THIS IS NOT `_doneWithIt`. That method is the reader saying "I am done
+  /// with this" — a deliberate act on one card, guarded by a last-one check so
+  /// a curious tap cannot empty the queue. This is the app noticing that the
+  /// reader finished something, which is not a decision and must not be
+  /// refusable: a queue of three articles all read through is the state in the
+  /// bug report, and nothing in the app would ever have changed it.
+  ///
+  /// The last-one guard is therefore deliberately ABSENT here. The order of the
+  /// three steps below is what makes that safe: the plan is installed FIRST, so
+  /// there is never a moment with fewer cards, and a write is started only if
+  /// the queue has nothing unread left.
+  ///
+  /// FREE. Installing a plan costs nothing; the write that may follow is the
+  /// same gated write a tap would start.
+  Future<void> _retireAndRefill(String articleId) async {
+    final Queue? q = _queue;
+    if (q == null) return;
+    final int index = q.slots.indexWhere(
+      (QueueSlot s) => s.articleId == articleId,
+    );
+    if (index < 0) return; // not in the queue right now — nothing to retire
+    if (!q.slots[index].isReady) return; // already a plan
+    if (q.slots[index].isWriting) return; // a write is landing in it
+
+    final Article? retired = q.retireReadySlot(index, _freePlan());
+    if (retired == null) return;
+    // The ledger row first, exactly as `_doneWithIt` does it: `retireReadySlot`
+    // promises the caller writes one, and skipping it made a shelved article
+    // vanish from the library the moment its slot was reused. This is NOT a
+    // read and NOT a listen — the counts stay wherever the reader put them.
+    try {
+      await _repo.recordLedger(
+        articleId: retired.id,
+        title: retired.title,
+        keywords: retired.keywords,
+        day: todayDay(),
+        kilobytes: (retired.wordCount * 6 ~/ 1024) + 1,
+      );
+    } catch (e) {
+      debugPrint('the article could not be archived: $e');
+    }
+    await _repo.saveQueue(q);
+    if (!mounted) return;
+    setState(() {});
+
+    // THE GUARANTEE: at least one card in the queue is something the reader has
+    // never met. Without it the queue fills with read articles again and the
+    // reader is back where they started, which is the whole complaint.
+    if (!await _hasUnreadCard(q)) {
+      unawaited(_maybeAutoWrite());
+    }
+  }
+
+  /// Whether any card in the queue is ready and has never been read or heard.
+  ///
+  /// Counts come from the database rather than from memory, because the whole
+  /// point of the check is that it cannot be fooled by a stale number: a card
+  /// the reader finished in an earlier session has to count as met.
+  Future<bool> _hasUnreadCard(Queue q) async {
+    try {
+      final Map<String, ({int reads, int listens})> counts =
+          await _repo.countsFor(<String>[
+        for (final QueueSlot s in q.slots) s.articleId,
+      ]);
+      for (final QueueSlot s in q.slots) {
+        if (!s.isReady) continue;
+        final ({int reads, int listens}) c = counts[s.articleId] ??
+            (reads: 0, listens: 0);
+        if (c.reads == 0 && c.listens == 0) return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('the queue counters could not be read: $e');
+      // Unreadable counts: assume there IS something new. The failure mode of a
+      // wrong "yes" is a card the reader has met, which they can retire with
+      // one tap. The failure mode of a wrong "no" is a paid write nobody asked
+      // for, and this app does not spend money on a guess.
+      return true;
+    }
   }
 
   /// Change a planned card: what it is about, and how long.
@@ -2458,7 +2516,14 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       player: _audio,
       onBack: _leaveArticle,
       hasAudio: _audio.hasRecordedAudio,
-      voiceLabel: _audio.source.label,
+      // WHO is speaking, named as closely as the phone can manage.
+      //
+      // This is the label that has to carry the truth when a recording fails
+      // mid-article: the device engine takes over, and a reader who hears the
+      // narrator change deserves to be told rather than left wondering whether
+      // they imagined it. The voice id and the chosen device voice are both
+      // named, so "which one is this?" has an answer on screen.
+      voiceLabel: _voiceLabel(),
       audioHandler: widget.audioHandler,
       size: _listenSize,
       onSize: (ListenSize s) {
@@ -2471,7 +2536,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       onWordTap: (String w) => _lookupWord(w, -1),
       listened: _listensInAll,
       onFinished: () => _onListenFinished(a),
-      onNextArticle: _peekNextListen() != null ? _playNextArticle : null,
+      // Always wired. The ring is built from the shelf, so there is something to
+      // go to unless the shelf is empty — and a button that appears and
+      // disappears as the ring is rebuilt is a button the reader learns not to
+      // trust. `_playNextArticle` is silent when it has nowhere to go.
+      onNextArticle: _playNextArticle,
       endMode: _listenAutoContinue,
       endModeCount: _listenAutoContinueCount,
       onEndMode: _setListenEndMode,
@@ -2532,30 +2601,43 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// because the rule is "a full listen counts, a start does not". An
   /// interrupted pass never reaches `onFinished`, so it is never counted.
   ///
+  /// One completed play-through.
+  ///
+  /// Three things happen here, in this order, and the order is the design:
+  ///
+  ///  1. The listen is COUNTED. Money and record-keeping first, because a run
+  ///     that continues past an uncounted article is a run the reader cannot
+  ///     account for afterwards.
+  ///  2. The card is REPLACED with a plan. An article that has been heard all
+  ///     the way through is an article the reader has met, and a queue that
+  ///     keeps offering it is a queue that has stopped being a queue. It goes
+  ///     to the shelf — the row, the counts, everything but the slot.
+  ///  3. Something NEW is guaranteed to be waiting. If the replacement left the
+  ///     queue with nothing unread, a write starts. This is the only automatic
+  ///     spending in the app and it is gated exactly as hard as a tap.
+  ///
   /// `loop` never reaches here at all — the player wraps and keeps speaking —
   /// but the guard is kept so a future caller cannot accidentally fall into
   /// auto-continue while the reader asked for one article on repeat.
   Future<void> _onListenFinished(Article a) async {
     await _countListen(a);
     if (!mounted) return;
+    // Heard all the way through: the card has done its job.
+    await _retireAndRefill(a.id);
+    if (!mounted) return;
     if (_listenAutoContinue == 'off' || _listenAutoContinue == 'loop') return;
     if (_listenAutoContinue == 'count') {
       if (_autoContinueLeft <= 0) return;
       _autoContinueLeft--;
     }
-    // TRIGGER TWO of three: the commute run reached the end of the queue. Checked
-    // BEFORE `_playNextArticle` because that method is silent about why it did
-    // nothing — it returns the same way for "there is no next article" and for
-    // "the next article could not be loaded" — and only the first of those is a
-    // reason to start writing.
-    //
-    // If there IS a next one, the reader is about to be listening to it and does
-    // not need a write started behind their back. If there is not, the queue is
-    // empty of anything to hear and this is exactly the moment to fill it.
-    final bool more = _peekNextListen() != null;
+    final String? afterThis = await _peekNextListen();
     await _playNextArticle();
-    if (more) return;
-    unawaited(_maybeAutoWrite());
+    if (afterThis == null) {
+      // The ring ran out of anything to speak, which for a ring means the shelf
+      // is empty or every article's bytes were freed. Writing one more is the
+      // only way forward and it is gated by `_mayAutoWrite` exactly as a tap is.
+      unawaited(_maybeAutoWrite());
+    }
   }
 
   /// Remaining auto-continues this session when the mode is `count`.
@@ -2563,16 +2645,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
   int _listensInAll = 0;
 
-  final Map<String, int> _studyCounts = <String, int>{};
-  final Map<String, String> _lastSeen = <String, String>{};
-
   /// Reads and listens per article, for the queue cards.
   ///
-  /// Kept SEPARATE from [_studyCounts], which is reads+listens added together
-  /// for the auto-continue ordering. The card shows them as two numbers because
-  /// they are two facts — hearing an article on a bus is not reading it — and a
-  /// card that showed only a sum would be a card that says "you met this 5
-  /// times" about something read once and heard four.
+  /// Two numbers and never a sum: hearing an article on a bus is not reading it,
+  /// and a card that showed only a total would be a card that says "you met this
+  /// 5 times" about something read once and heard four.
   final Map<String, ({int reads, int listens})> _articleCounts =
       <String, ({int reads, int listens})>{};
 
@@ -2604,10 +2681,13 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     }
   }
 
-  /// Reads + listens, the same "how much have I met this" number the shelf uses.
-  int _studyOf(String articleId) => _studyCounts[articleId] ?? 0;
-  String _lastSeenOf(String articleId) => _lastSeen[articleId] ?? '';
-
+  /// Reads + listens for the article on screen, and the day it was last met.
+  ///
+  /// THE ORDERING NO LONGER READS THESE. The listening ring is built from the
+  /// shelf, which already carries both numbers for every article the phone can
+  /// speak — a cache of the open article's two numbers was a second source of
+  /// truth for exactly one row of it, and it was stale for the other rows by
+  /// definition. What remains here is what the Article screen shows.
   Future<void> _loadListenCounts(String articleId) async {
     try {
       final (int today, int total) = await _repo.readCounts(
@@ -2620,8 +2700,6 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         _readsToday = today;
         _readsInAll = total;
         _listensInAll = listens;
-        _studyCounts[articleId] = total + listens;
-        _lastSeen[articleId] = todayDay();
       });
     } catch (e) {
       debugPrint('listen counts unavailable: $e');
@@ -2630,7 +2708,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
   /// Advance to the next article and start it. Silent when there is nothing.
   Future<void> _playNextArticle() async {
-    final String? nextId = _peekNextListen();
+    final String? nextId = await _peekNextListen();
     if (nextId == null) return;
     final Article? next = _articleFor(nextId);
     if (next == null || next.sentences.isEmpty) return;
@@ -2643,52 +2721,53 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     unawaited(_loadReadCounts(next.id));
   }
 
-  /// The next article to listen to, or null. Sees the live queue.
+  /// The listening run: an ordered RING of everything the phone can speak.
   ///
-  /// Ordering is the reader's setting: a commute that always plays the same
-  /// three in the same order gets old, and "heard it today" is the one fact
-  /// that should push a random pick away from something.
-  String? _peekNextListen() {
-    final List<({String id, int studied, String seen})> all =
-        <({String id, int studied, String seen})>[];
-    final Set<String> ids = <String>{};
-    for (final QueueSlot s in _queue?.slots ?? const <QueueSlot>[]) {
-      final Article? a = _articleFor(s.articleId);
-      if (a == null || a.sentences.isEmpty) continue;
-      if (!ids.add(a.id)) continue;
-      all.add((id: a.id, studied: _studyOf(a.id), seen: _lastSeenOf(a.id)));
+  /// Built from the shelf, not from the three live slots. That is the whole
+  /// difference between a run that keeps going and one that stops after three
+  /// articles: the queue is rewritten underneath the run — a slot is retired, a
+  /// write lands, the reader taps Done with it — and a picker that only sees
+  /// the current three runs out of candidates the moment it has heard them all.
+  ///
+  /// Rebuilt on demand rather than cached, because the shelf is a query and a
+  /// stale ring would offer an article whose slot has just been reused. One
+  /// `await` on a local SQLite read is not a cost worth a cache invalidation
+  /// bug.
+  Future<ListenSequence?> _listenSequence() async {
+    final Queue? q = _queue;
+    if (q == null) return null;
+    try {
+      final Library lib = await _repo.library(q);
+      return listenSequenceOf(lib.shelf());
+    } catch (e) {
+      debugPrint('the listening order could not be read: $e');
+      return null;
     }
-    final String? current = _openId;
-    final List<({String id, int studied, String seen})> others =
-        <({String id, int studied, String seen})>[
-      for (final e in all)
-        if (e.id != current) e,
-    ];
-    if (others.isEmpty) return null;
+  }
 
-    switch (_listenAutoOrder) {
-      case 'oldest':
-        others.sort((a, b) => a.id.compareTo(b.id));
-      case 'mostStudied':
-        others.sort((a, b) => b.studied.compareTo(a.studied));
-      case 'leastStudied':
-        others.sort((a, b) => a.studied.compareTo(b.studied));
-      case 'random':
-        final List<({String id, int studied, String seen})> fresh =
-            <({String id, int studied, String seen})>[
-          for (final e in others)
-            if (e.seen != todayDay()) e,
-        ];
-        final List<({String id, int studied, String seen})> pool =
-            fresh.isNotEmpty ? fresh : others;
-        return pool[Random().nextInt(pool.length)].id;
-      case 'newest':
-      default:
-        // `_freePlan` ids are `plan-<millis>-…`, so a descending sort is a
-        // descending creation order. The bundled sample has a stable id.
-        others.sort((a, b) => b.id.compareTo(a.id));
-    }
-    return others.first.id;
+  /// The next article to listen to, or null when nothing can be spoken.
+  ///
+  /// One step around the ring, so it never repeats an article until it has been
+  /// all the way round — and it WRAPS, which is what makes a run not stop. The
+  /// only thing that ends a run is the reader's own count (`count` end mode) or
+  /// a tap on Stop.
+  ///
+  /// [current] is the article playing now, and it is excluded from the draw
+  /// rather than from the ring: staying in the ring is what lets a run come
+  /// back round to it, and taking it out of the ring entirely is what used to
+  /// make the third article the last one.
+  Future<String?> _peekNextListen() async {
+    final ListenSequence? ring = await _listenSequence();
+    if (ring == null || ring.isEmpty) return null;
+    final String? current = _openId;
+    final ListenSequence onNow =
+        current == null ? ring : ring.on(current);
+    final String? nextId = onNow.next(_listenOrder, todayDay());
+    // The ring held exactly one article and it is the one playing. A run of one
+    // is a run that has nowhere to go, and saying so is better than replaying
+    // the same piece forever behind the reader's back.
+    if (nextId == current) return null;
+    return nextId;
   }
 
   /// Read or Listen. The prototype's segmented control; the indicator slides
@@ -2880,11 +2959,15 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // the count they just paid attention to is invisible where they will look
     // for it next.
     unawaited(_loadQueueCounts());
+    // Read all the way through, so the card has done its job. Not awaited: the
+    // toast is about the READ, and a reader who has just tapped a button should
+    // not wait on a queue write to see it land.
+    unawaited(_retireAndRefill(a.id));
     Toast.show(
       context,
       _readsToday <= 1
-          ? 'counted · it stays in your queue'
-          : 'counted ${_readsToday} times today · it stays in your queue',
+          ? 'counted · it stays in your library'
+          : 'counted ${_readsToday} times today · it stays in your library',
     );
     // TRIGGER ONE of three: the reader just finished an article. This is the
     // moment the next one should start — not a minute later on a timer, and not
@@ -2893,6 +2976,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     //
     // It is not awaited, and that matters: the write is a 1–3 minute network call
     // and the reader must not wait on it to leave this screen.
+    //
+    // `_retireAndRefill` above also starts a write when the replacement left
+    // nothing unread. Both paths are gated by `_mayAutoWrite`, so calling it
+    // twice costs nothing — the second call finds the claim already taken.
     unawaited(_maybeAutoWrite());
   }
 
@@ -3129,13 +3216,18 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
             }
           }
         }
-        return FutureBuilder<List<({String title, int reads, int listens})>>(
+        return FutureBuilder<List<({String articleId, String title, int reads, int listens})>>(
           future: _repo.mostRevisited(),
-          builder: (BuildContext _, AsyncSnapshot<List<({String title, int reads, int listens})>> rs) {
+          builder: (BuildContext _, AsyncSnapshot<List<({String articleId, String title, int reads, int listens})>> rs) {
             final List<RevisitedRow> revisited = <RevisitedRow>[
-              for (final ({String title, int reads, int listens}) r
-                  in (rs.data ?? const <({String title, int reads, int listens})>[]))
-                RevisitedRow(title: r.title, reads: r.reads, listens: r.listens),
+              for (final ({String articleId, String title, int reads, int listens}) r
+                  in (rs.data ?? const <({String articleId, String title, int reads, int listens})>[]))
+                RevisitedRow(
+                  articleId: r.articleId,
+                  title: r.title,
+                  reads: r.reads,
+                  listens: r.listens,
+                ),
             ];
             return HistoryScreen(
               year: now.year,
@@ -3144,12 +3236,54 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
               cells: cells,
               mostRevisited: revisited,
               onOpenDay: (int day) => _openDay(day, now),
+              onOpenArticle: (String id) => _openArticleById(id),
               onBack: _toQueue,
             );
           },
         );
       },
     );
+  }
+
+  /// Open an article from a history row. The calendar and *Most revisited*
+  /// answer "which one was it"; this is the tap that says "read it again".
+  ///
+  /// The shelf is asked first, because it is the one index that knows about
+  /// every article this phone has ever had — live, written, or freed — and a
+  /// freed article has to be told apart from a missing one rather than reported
+  /// as the same thing. Failing that, the body is fetched by id directly.
+  Future<void> _openArticleById(String articleId) async {
+    final Queue? q = _queue;
+    if (q != null) {
+      final Library lib = await _repo.library(q);
+      if (!mounted) return;
+      for (final ShelfRow row in lib.shelf()) {
+        if (row.articleId == articleId) {
+          await _openFromShelf(row, q);
+          return;
+        }
+      }
+    }
+    // Not on the shelf. It was written in an earlier session and its ledger row
+    // is gone, or the id is stale — either way one direct query is the honest
+    // attempt before saying the text is not here.
+    try {
+      final Article? stored = await _repo.loadArticle(articleId);
+      if (!mounted) return;
+      if (stored != null && stored.sentences.isNotEmpty) {
+        setState(() {
+          _openId = stored.id;
+          _openFromLibrary = true;
+          _listeningOn = false;
+          _tab = Dest.article;
+        });
+        return;
+      }
+    } catch (e) {
+      debugPrint('the stored body of $articleId could not be read: $e');
+      if (!mounted) return;
+    }
+    Toast.show(context, 'the text of that one is no longer on this phone');
   }
 
   /// One day in detail. The screen's own sheet, fed by the SAME day rows the
@@ -3159,8 +3293,8 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         '${month.month.toString().padLeft(2, '0')}-'
         '${day.toString().padLeft(2, '0')}';
 
-    final List<({String title, int reads, int listens})> rows =
-        await _repo.dayArticles(key);
+    final List<({String articleId, String title, int reads, int listens})>
+        rows = await _repo.dayArticles(key);
     final ({int reads, int listens}) totals = await _repo.dayTotals(key);
     final int minutes = await _repo.dayMinutes(key);
 
@@ -3174,6 +3308,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         listens: totals.listens,
         articles: rows,
         minutes: minutes,
+        onOpenArticle: (String id) {
+          Navigator.of(context).pop();
+          unawaited(_openArticleById(id));
+        },
       ),
     );
   }
@@ -3361,7 +3499,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         unawaited(_save('listen:autoPlay', on ? 'on' : 'off'));
       },
       onListenAutoOrder: (String order) {
-        setState(() => _listenAutoOrder = order);
+        setState(() => _listenOrder = ListenOrder.fromKey(order));
         unawaited(_save('listen:autoOrder', order));
       },
       onProbeVoice: () async {
@@ -3562,6 +3700,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
   /// Re-point the player after any voice change. One place, so the engine in
   /// play can never disagree with the row that claims to be selected.
+  ///
+  /// The article in flight keeps its narrator. `configure` deliberately does not
+  /// re-roll the voice while something is playing — a settings change used to
+  /// swap the MiMo voice for the rest of the article, which is a voice change
+  /// in the middle of a piece from a screen that has nothing to do with
+  /// playback. The next `narrate` applies the new setting.
   Future<void> _applyVoice() async {
     final String? key = await _keys.voice();
     _hasVoiceKey = key != null && key.trim().isNotEmpty;
@@ -3574,6 +3718,31 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       voice: _voiceName,
     );
     if (mounted) setState(() {});
+  }
+
+  /// The sentence under the transport that says who is speaking.
+  ///
+  /// THREE STATES, and naming them is the point:
+  ///
+  ///  · this article is being narrated by a MiMo recording → the voice id, so
+  ///    "which one is this?" has an answer;
+  ///  · the recording failed and the phone took over → the device voice's own
+  ///    name, so a reader who hears the narrator change is told rather than
+  ///    left wondering whether they imagined it;
+  ///  · the phone is the only engine → the same, plainly.
+  ///
+  /// The old label said "a recorded voice · MiMo · online · free" whether or
+  /// not a recording was actually playing, which is exactly the sentence that
+  /// makes a reader distrust every other sentence on the screen.
+  String _voiceLabel() {
+    final bool recording = _audio.narrator == Narrator.recorded;
+    if (recording) {
+      final String id = _audio.speakingAs;
+      return id.isEmpty ? 'a recorded voice · MiMo' : '$id · MiMo · recorded';
+    }
+    final String name = _audio.deviceVoice.name;
+    if (name.isNotEmpty) return '$name · this phone';
+    return "the phone's own voice · free · offline";
   }
 }
 
@@ -3593,31 +3762,17 @@ class _Notice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final Palette c = context.colors;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Text(
-          'Every word and every sentence has sound',
-          style: TextStyle(
-            fontFamily: TypeScale.sans,
-            fontSize: 12.5,
-            fontWeight: FontWeight.w700,
-            color: c.ink2,
-          ),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          'tap a word for its meaning · hold a line to hear it · the Listen '
-          'tab plays the whole thing · nothing to confirm — the app records '
-          'what you touched and never asks whether you remember',
-          style: TextStyle(
-            fontFamily: TypeScale.sans,
-            fontSize: 12,
-            height: 1.55,
-            color: c.ink3,
-          ),
-        ),
-      ],
+    // One line. It used to explain the whole interaction model — tap a word,
+    // hold a line, the Listen tab plays the whole thing, nothing to confirm —
+    // which is a manual, and a manual that is always on screen is a manual
+    // nobody reads past the second day.
+    return Text(
+      'Every word and every sentence has sound.',
+      style: TextStyle(
+        fontFamily: TypeScale.sans,
+        fontSize: 12,
+        color: c.ink3,
+      ),
     );
   }
 }

@@ -57,10 +57,40 @@ extension VoiceSourceX on VoiceSource {
 /// perfectly ordinary phone, and the honest thing is to say so on the Settings
 /// screen instead of leaving the reader pressing a button that does nothing.
 class DeviceVoice {
-  const DeviceVoice({required this.available, required this.note});
+  const DeviceVoice({
+    required this.available,
+    required this.note,
+    this.name = '',
+  });
 
   final bool available;
   final String note;
+
+  /// The voice the engine will actually use, as the platform names it. Empty
+  /// until one has been chosen.
+  ///
+  /// Carried because the Listen screen has to say WHO is speaking, and "the
+  /// phone's own voice" is not an answer when the phone has several and the
+  /// reader picked a male one. See [_pickDeviceVoice].
+  final String name;
+}
+
+/// Which engine is narrating THIS article.
+///
+/// A property of the article, not of a sentence. This is the whole fix for the
+/// half-male, half-female article: the fallback used to be decided per sentence,
+/// so one dropped request in the middle of a piece swapped the narrator halfway
+/// through and nothing on screen said so. Now the choice is made once, when the
+/// article starts, and held for all of it.
+enum Narrator {
+  /// A MiMo recording. `_speakingAs` names which voice.
+  recorded,
+
+  /// The phone's own engine, with an explicitly chosen voice.
+  device,
+
+  /// Not decided yet — before `narrate` has run for this article.
+  unknown,
 }
 
 /// What a view needs from whatever is making the sound.
@@ -109,6 +139,15 @@ abstract class SentencePlayer {
   VoiceSource get source;
 
   bool get hasRecordedAudio;
+
+  /// The MiMo voice id actually being sent for the article now narrating.
+  String get speakingAs;
+
+  /// Which engine is narrating the article now open. One article, one engine.
+  Narrator get narrator;
+
+  /// What the phone's own engine can do, including the voice it will use.
+  DeviceVoice get deviceVoice;
 }
 
 class SentenceAudio implements SentencePlayer {
@@ -164,6 +203,17 @@ class SentenceAudio implements SentencePlayer {
   /// sentence on every call, so rolling there would re-roll per sentence.
   String _speakingAs = VoiceEndpoint.mimo.voices.first;
 
+  /// Which engine is narrating the article currently open. See [Narrator].
+  ///
+  /// [Narrator.unknown] until [narrate] has run, and it runs once per article —
+  /// so a play that starts before any article was named speaks with the device
+  /// engine, which is the only engine that needs no probe.
+  Narrator _narrator = Narrator.unknown;
+
+  /// The platform's name for the voice [_pickDeviceVoice] chose. Reported so
+  /// the Listen screen can name it rather than saying "the phone's voice".
+  String _deviceVoiceName = '';
+
   bool _sessionReady = false;
 
   @override
@@ -177,10 +227,32 @@ class SentenceAudio implements SentencePlayer {
   @override
   bool get hasRecordedAudio => _configured == VoiceSource.recorded;
 
+  @override
   DeviceVoice get deviceVoice => _device;
+
+  /// The MiMo voice id in use for the article now narrating. What the API was
+  /// actually sent, which is [_voice] resolved out of `Random`.
+  @override
+  String get speakingAs => _speakingAs;
+
+  /// Which engine is narrating the article now open. See [Narrator].
+  @override
+  Narrator get narrator => _narrator;
 
   /// Point the player at an engine. Called at boot and whenever Settings
   /// changes, so neither screen has to know how the other one was configured.
+  ///
+  /// DELIBERATELY DOES NOT TOUCH [_speakingAs] WHILE AN ARTICLE IS NARRATING.
+  ///
+  /// It used to re-derive the voice from an empty article id, which rolled a
+  /// DIFFERENT MiMo voice for the rest of the article the moment the reader
+  /// opened Settings — a voice change in the middle of a piece, from a screen
+  /// that has nothing to do with playback. The comment claimed "the next
+  /// `narrate` will resolve properly", and nothing re-ran `narrate` after a
+  /// settings change, so it never did.
+  ///
+  /// A change of engine or voice takes effect on the NEXT article, which is the
+  /// only boundary a listener can hear it at.
   void configure({
     required VoiceSource source,
     String apiKey = '',
@@ -195,11 +267,16 @@ class SentenceAudio implements SentencePlayer {
     if (baseUrl.trim().isNotEmpty) _baseUrl = baseUrl.trim();
     if (voice.trim().isNotEmpty) {
       _voice = voice.trim();
-      // A mode change takes effect on the article that is open now, not on the
-      // next one. `articleId` is '' here because no article is being narrated
-      // yet — the next `narrate` will resolve properly.
-      _speakingAs = _resolveVoice(_voice, '');
+      if (_narrator == Narrator.unknown) {
+        // Nothing is playing, so this roll is the one the next article starts
+        // from. `articleId` is '' because no article is being narrated yet.
+        _speakingAs = _resolveVoice(_voice, '');
+      }
     }
+    // Whatever the new setting is, the article in flight keeps its narrator.
+    // `narrate` re-decides at the next article boundary.
+    if (_narrator != Narrator.unknown) return;
+    _narrator = Narrator.unknown;
   }
 
   /// Roll a real id for [kVoiceRandom], or pass the id through.
@@ -217,18 +294,39 @@ class SentenceAudio implements SentencePlayer {
     return real[int.parse(_hash(articleId), radix: 16) % real.length];
   }
 
-  /// Start narrating [articleId]. The ONE place the Random choice is applied.
+  /// Start narrating [articleId]. The ONE place the Random choice is applied,
+  /// and the ONE place the engine is chosen.
   ///
   /// Called when an article opens, which is the boundary the choice belongs
-  /// on: one article, one narrator. Resolving inside [stop] looked equivalent
-  /// and was not — [play] stops the previous sentence on every call, so the
-  /// narrator was re-resolved sentence by sentence and the piece became
-  /// unlistenable. The same article always resolves to the same voice, so a
-  /// sentence tapped on the Read screen, the Listen screen and a second
-  /// listen next week all agree on who is speaking.
+  /// on: one article, one narrator, one engine. Resolving inside [stop] looked
+  /// equivalent and was not — [play] stops the previous sentence on every call,
+  /// so the narrator was re-resolved sentence by sentence and the piece became
+  /// unlistenable.
+  ///
+  /// The engine is probed ONCE here rather than per sentence. That is the fix
+  /// for the article that was half male and half female: a remote recording
+  /// that failed used to drop that ONE sentence to the phone's default engine,
+  /// so a piece could change narrator halfway through with nothing on screen
+  /// saying so. Now a probe that fails means this whole article is spoken by
+  /// the device, which is a consistent article rather than a patchwork.
+  ///
+  /// The same article always resolves to the same voice, so a sentence tapped
+  /// on the Read screen, the Listen screen and a second listen next week all
+  /// agree on who is speaking.
   @override
   void narrate(String articleId) {
     _speakingAs = _resolveVoice(_voice, articleId);
+    // A configured recording with no key is not a recording. Deciding here,
+    /// once, means `play` never has to ask again mid-article.
+    if (_configured != VoiceSource.recorded || _apiKey.isEmpty) {
+      _narrator = Narrator.device;
+      return;
+    }
+    _narrator = Narrator.recorded;
+    // The device voice is chosen up front, so a later fallback — a recording
+    // that will not play — lands on a voice that was picked rather than on
+    // whatever the platform happens to default to.
+    unawaited(_ensureDeviceVoice());
   }
 
   /// Set the engine up once. Called from the constructor and not awaited: nothing
@@ -249,7 +347,93 @@ class SentenceAudio implements SentencePlayer {
     } catch (e) {
       debugPrint('tts configure failed: $e');
     }
+    // A voice is chosen before the first sentence, not left to the platform.
+    await _ensureDeviceVoice();
   }
+
+  /// Pick the voice the phone will speak with, and set it.
+  ///
+  /// WHY THIS EXISTS. `flutter_tts` was never told which voice to use, so it
+  /// spoke with whatever the platform defaults to — typically female on both
+  /// Android and iOS. That is invisible while the device engine is the only
+  /// engine, and it is the other half of the half-male-half-female article the
+  /// moment a recording falls back to it.
+  ///
+  /// The pick follows [_voice]: a male MiMo voice gets a male device voice, a
+  /// female one a female, so a fallback is a change of timbre rather than a
+  /// change of person. The match is by NAME rather than by any gender metadata,
+  /// because `flutter_tts` exposes neither a gender nor a stable id — only the
+  /// locale and whatever the engine chose to call the voice. So the names are
+  /// matched heuristically and the result is REPORTED on the Listen screen
+  /// instead of assumed: a reader who hears the wrong one can see which voice
+  /// was picked and change it.
+  ///
+  /// Idempotent, and cheap after the first call: the answer is remembered.
+  Future<void> _ensureDeviceVoice() async {
+    if (_deviceVoiceName.isNotEmpty) return;
+    try {
+      await _ttsReady;
+      final Object? raw = await _tts.getVoices;
+      if (raw is! List) return;
+      final List<Map<Object?, Object?>> voices = <Map<Object?, Object?>>[
+        for (final Object? v in raw)
+          if (v is Map) v,
+      ];
+      final Map<Object?, Object?>? pick = _pickDeviceVoice(voices);
+      if (pick == null) return;
+      // `setVoice` takes `Map<String, String>` while `getVoices` hands back
+      // whatever the platform channel produced. The conversion is lossy by
+      // design: a voice is identified by its name and its locale, and nothing
+      // else in the map is load-bearing.
+      await _tts.setVoice(<String, String>{
+        for (final MapEntry<Object?, Object?> e in pick.entries)
+          '${e.key}': '${e.value}',
+      });
+      _deviceVoiceName = '${pick['name'] ?? ''}'.trim();
+      _device = DeviceVoice(
+        available: true,
+        note: 'English is installed',
+        name: _deviceVoiceName,
+      );
+    } catch (e) {
+      // A phone that will not list its voices still speaks. The label falls
+      // back to the generic sentence, which is better than a dead player.
+      debugPrint('the device voice could not be chosen: $e');
+    }
+  }
+
+  /// Which of [voices] to use, or null when there is nothing en-US to choose.
+  ///
+  /// [wantedMale] comes from [_voice]: `Milo` and `Dean` are the male MiMo
+  /// voices and everything else is female or neutral. The match is on the
+  /// voice's own name, which on most engines carries it — `en-us-x-tpc#male`,
+  /// `Male English (US)`, `Alex`. Where nothing matches, the FIRST en-US voice
+  /// is taken rather than the platform default, because at least it is one this
+  /// app chose and can name.
+  Map<Object?, Object?>? _pickDeviceVoice(
+    List<Map<Object?, Object?>> voices,
+  ) {
+    final List<Map<Object?, Object?>> english = <Map<Object?, Object?>>[
+      for (final Map<Object?, Object?> v in voices)
+        if ('${v['locale'] ?? ''}'.toLowerCase().startsWith('en-us')) v,
+    ];
+    if (english.isEmpty) return null;
+    final bool wantedMale = _isMaleMiMoVoice(_voice);
+    for (final Map<Object?, Object?> v in english) {
+      final String name = '${v['name'] ?? ''}'.toLowerCase();
+      final bool male = name.contains('male') && !name.contains('female');
+      if (male == wantedMale) return v;
+    }
+    return english.first;
+  }
+
+  /// Whether a MiMo voice id is one of the male ones.
+  ///
+  /// A literal list rather than an inference: the ids are the five the API
+  /// answers to, they are fixed, and a name-based guess would be a guess about
+  /// a voice this app cannot hear.
+  static bool _isMaleMiMoVoice(String voice) =>
+      voice == 'Milo' || voice == 'Dean';
 
   /// Ask the phone what it can speak with. Cheap, and the answer is shown on the
   /// Settings screen instead of being discovered by pressing play.
@@ -271,8 +455,14 @@ class SentenceAudio implements SentencePlayer {
           note: 'this phone could not be asked about its voices',
         );
       } else {
-        _device =
-            const DeviceVoice(available: true, note: 'English is installed');
+        _device = DeviceVoice(
+          available: true,
+          note: 'English is installed',
+          // Whatever was chosen already, if a voice has been chosen. An empty
+          // name here means `_ensureDeviceVoice` has not run yet, and the
+          // Settings screen says the generic sentence rather than inventing one.
+          name: _deviceVoiceName,
+        );
       }
     } catch (e) {
       _device = const DeviceVoice(
@@ -320,9 +510,13 @@ class SentenceAudio implements SentencePlayer {
     final Completer<void> done = Completer<void>();
     _current = done;
 
-    // A recorded voice, when one is configured and one can be had. Any failure
-    // at all falls THROUGH to the device engine rather than leaving a gap.
-    if (_configured == VoiceSource.recorded && _apiKey.isNotEmpty) {
+    // A recorded voice, when THIS ARTICLE is being narrated by one. The engine
+    // was decided in [narrate] and is not re-asked per sentence: a recording
+    // that fails here falls through to the device engine, and the device engine
+    // has a voice that was CHOSEN to match — so a fallback is a change of
+    // timbre within one narrator rather than a different person halfway through
+    // the piece, which is the bug this whole arrangement exists to prevent.
+    if (_narrator == Narrator.recorded && _apiKey.isNotEmpty) {
       final String? path = await _cachedRecording(text, urgent: true);
       if (path != null) {
         final bool played = await _playFile(path);
@@ -351,6 +545,10 @@ class SentenceAudio implements SentencePlayer {
     try {
       await _ensureSession();
       await _ttsReady;
+      // The voice is set here as well as in `_ensureDeviceVoice`, because the
+      // engine can be reconfigured underneath us and a sentence spoken with the
+      // platform default is exactly the bug being fixed.
+      await _ensureDeviceVoice();
       // Whichever route got here, this is the phone speaking.
       _lastSpoken = VoiceSource.device;
       await _tts.speak(text);
@@ -502,7 +700,12 @@ class SentenceAudio implements SentencePlayer {
   void warm(String text) {
     // Nothing to prepare for the device engine, and nothing to prepare when
     // there is no key — both cases speak live and cost nothing to 'miss'.
-    if (_configured != VoiceSource.recorded || _apiKey.isEmpty) return;
+    //
+    // Reads [_narrator], not [_configured]: the question is which engine is
+    // narrating THIS article, and a reader who turned the recording off after
+    // this one started must not have the app synthesise sentences nobody will
+    // hear.
+    if (_narrator != Narrator.recorded || _apiKey.isEmpty) return;
     if (_inflight.containsKey(text) || _warmQueue.contains(text)) return;
     // The sentence about to play matters more than one queued when the
     // listener was still three sentences back, so newest intent goes to the
@@ -631,7 +834,7 @@ class SentenceAudio implements SentencePlayer {
   /// nothing. The screen restarts the sentence through [play] instead.
   Future<void> resume() async {
     if (_currentText.isEmpty) return;
-    if (_configured == VoiceSource.recorded && _apiKey.isNotEmpty) {
+    if (_narrator == Narrator.recorded && _apiKey.isNotEmpty) {
       final String? path = await _cachedRecording(_currentText, urgent: true);
       if (path != null && await _playFile(path)) {
         _lastSpoken = VoiceSource.recorded;
@@ -640,6 +843,7 @@ class SentenceAudio implements SentencePlayer {
     }
     try {
       await _ttsReady;
+      await _ensureDeviceVoice();
       _lastSpoken = VoiceSource.device;
       await _tts.speak(_currentText);
     } catch (_) {

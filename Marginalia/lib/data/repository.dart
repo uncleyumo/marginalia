@@ -600,6 +600,7 @@ class LibraryRepository {
         kilobytes: r.kilobytes,
         freedKilobytes: r.freedKilobytes,
         goneReason: _reason(r.goneReason),
+        lastSeenDay: r.lastSeenDay,
       );
 
   static GoneReason? _reason(String? raw) {
@@ -883,13 +884,24 @@ class LibraryRepository {
   /// once, and a design that could only store the second could not answer the
   /// question the reader actually has. So this is a query, every time, over the
   /// same rows the calendar reads.
-  Future<List<({String title, int reads, int listens})>> mostRevisited({
+  ///
+  /// GROUP BY `article_id`, NOT `title`. Two articles the writer happened to
+  /// give the same name used to have their attention SUMMED into one row here —
+  /// the same defect the shelf had (see [Library.shelf]), and the same reason.
+  /// `recentTitles` is a hint rather than a constraint, so a collision is a
+  /// matter of time rather than a corner case.
+  ///
+  /// `article_id` is in the result because the row has to be OPENABLE. A list
+  /// of titles is a list of things you have to go and find somewhere else.
+  Future<List<({String articleId, String title, int reads, int listens})>>
+      mostRevisited({
     int limit = 4,
   }) async {
     final List<QueryRow> rows = await db
         .customSelect(
-          'SELECT title AS title, SUM(reads) AS reads, SUM(listens) AS listens '
-          'FROM day_log_rows GROUP BY title '
+          'SELECT article_id AS articleId, title AS title, '
+          'SUM(reads) AS reads, SUM(listens) AS listens '
+          'FROM day_log_rows GROUP BY article_id '
           'HAVING (SUM(reads) + SUM(listens)) > 0 '
           'ORDER BY (SUM(reads) + SUM(listens)) DESC, title ASC LIMIT ?',
           variables: <Variable<Object>>[Variable<int>(limit)],
@@ -897,6 +909,7 @@ class LibraryRepository {
         .get();
     return rows
         .map((QueryRow r) => (
+              articleId: r.read<String>('articleId'),
               title: r.read<String>('title'),
               reads: r.read<int>('reads'),
               listens: r.read<int>('listens'),
@@ -922,19 +935,27 @@ class LibraryRepository {
 
   /// Which articles were touched on one day. The SAME rows the calendar and the
   /// revisit list read, so a day's detail sheet cannot disagree with its cell.
-  Future<List<({String title, int reads, int listens})>> dayArticles(
+  ///
+  /// GROUP BY `article_id` and carry it through, for the two reasons on
+  /// [mostRevisited]: same-titled articles must not merge, and a row the reader
+  /// can see has to be a row the reader can open.
+  Future<List<({String articleId, String title, int reads, int listens})>>
+      dayArticles(
     String day,
   ) async {
     final List<QueryRow> rows = await db
         .customSelect(
-          'SELECT title AS title, SUM(reads) AS reads, SUM(listens) AS listens '
+          'SELECT article_id AS articleId, title AS title, '
+          'SUM(reads) AS reads, SUM(listens) AS listens '
           'FROM day_log_rows WHERE day = ? '
-          'GROUP BY title ORDER BY (SUM(reads) + SUM(listens)) DESC, title ASC',
+          'GROUP BY article_id '
+          'ORDER BY (SUM(reads) + SUM(listens)) DESC, title ASC',
           variables: <Variable<Object>>[Variable<String>(day)],
         )
         .get();
     return rows
         .map((QueryRow r) => (
+              articleId: r.read<String>('articleId'),
               title: r.read<String>('title'),
               reads: r.read<int>('reads'),
               listens: r.read<int>('listens'),

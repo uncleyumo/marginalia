@@ -33,6 +33,7 @@ class ShelfRow {
     required this.freedKilobytes,
     required this.isLive,
     required this.isGone,
+    this.lastSeenDay = '',
   });
 
   /// The ledger's key. Freeing space writes to this row, so a screen that only
@@ -69,6 +70,13 @@ class ShelfRow {
   /// size itself is gone — zeroing both together would leave the reader unable
   /// to account for what happened.
   final int freedKilobytes;
+
+  /// `YYYY-MM-DD`, the day this article was last written or read.
+  ///
+  /// On the shelf because the listening run orders by it: "which of these is
+  /// newer" is a question with one stored answer, and it is this one. Empty for
+  /// a row that predates the column, which is the oldest thing there is.
+  final String lastSeenDay;
 
   /// Still in the queue, so it can be opened.
   final bool isLive;
@@ -147,6 +155,7 @@ class Library {
         freedKilobytes: e.freedKilobytes,
         isLive: false,
         isGone: e.isGone,
+        lastSeenDay: e.lastSeenDay,
       );
     }
 
@@ -180,6 +189,7 @@ class Library {
         freedKilobytes: existing.freedKilobytes,
         isLive: true,
         isGone: existing.isGone,
+        lastSeenDay: existing.lastSeenDay,
       );
     }
 

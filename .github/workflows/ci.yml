@@ -8,6 +8,13 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # The Flutter project lives in `Marginalia/`, not at the repository root.
+    # Without this every step ran in the root and died at `flutter pub get`
+    # with "Expected to find project root in current working directory" —
+    # every push since this workflow was added failed for that reason.
+    defaults:
+      run:
+        working-directory: Marginalia
     steps:
       - uses: actions/checkout@v4
 

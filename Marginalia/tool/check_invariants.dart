@@ -22,6 +22,7 @@ import '../lib/domain/picture.dart';
 import '../lib/domain/plan.dart';
 import '../lib/domain/queue.dart';
 import '../lib/domain/sequence.dart';
+import '../lib/domain/subjects.dart';
 import '../lib/domain/word_pool.dart';
 import '../lib/data/remote/api.dart';
 
@@ -368,6 +369,35 @@ void main() {
   check('the queue is still three', retireQ.length == kQueueSize);
   check('a planned slot cannot be retired',
       retireQ.retireReadySlot(0, _planned('n2')) == null);
+
+  // A reroll carries the replacement's VISIBLE subject, not a blank.
+  final Queue planRerollQ = _queueWithTwoReadyOnePlanned();
+  planRerollQ.reroll(
+    2,
+    QueueSlot(
+      articleId: 'p9',
+      state: SlotState.planned,
+      instruction: 'Why snow squeaks underfoot',
+      instructionId: kSuggestedInstructionId,
+      plannedWords: 180,
+      plannedBand: LengthBand.short,
+    ),
+  );
+  check('a reroll keeps the replacement subject',
+      planRerollQ.slots[2].instruction == 'Why snow squeaks underfoot');
+  check('and marks it as a suggestion', planRerollQ.slots[2].isSuggested);
+  check('which the card does not call the reader\'s own instruction',
+      planRerollQ.slots[2].subjectNote.contains('suggested'));
+
+  // The suggester does not repeat what the reader just saw.
+  final SubjectSuggester suggester = SubjectSuggester();
+  final Set<String> drawn = <String>{};
+  for (int i = 0; i < 20; i++) {
+    drawn.add(suggester.next());
+  }
+  check('twenty draws are twenty distinct subjects', drawn.length == 20);
+  check('every suggestion is a concrete sentence',
+      kSuggestedSubjects.every((String s) => s.trim().split(' ').length >= 4));
 
   // ── 4. counts are not storage ─────────────────────────────────────────
   section('4. freeing space keeps the counts');
@@ -875,11 +905,12 @@ void main() {
   check('typing a new one clears the saved id',
       q2.slots[0].instructionId == null);
 
-  // Reroll means "not this, something else" — so it clears the instruction.
-  // Keeping the reader's sentence and changing only the length would be a
-  // reroll that rerolls nothing.
+  // Reroll installs the REPLACEMENT plan, including its subject. A replacement
+  // with no subject is a free pick (the case here); one carrying a suggestion
+  // keeps that suggestion (checked earlier). What must never happen is keeping
+  // the OLD instruction while only the length moves.
   final QueueSlot rolled = q2.reroll(0, _planned('x'))!;
-  check('a reroll clears the instruction', rolled.isFreePick);
+  check('a reroll does not keep the old instruction', rolled.isFreePick);
   check('and it is still a free pick on the card', rolled.subjectLabel == 'Anything');
 
   // The instruction type itself.

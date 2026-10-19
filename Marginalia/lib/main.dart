@@ -52,6 +52,7 @@ import 'domain/plan.dart';
 import 'domain/queue.dart';
 import 'domain/sequence.dart';
 import 'domain/stopwords.dart';
+import 'domain/subjects.dart';
 import 'domain/word_pool.dart';
 import 'features/article/article_screen.dart';
 import 'features/article/listen_screen.dart';
@@ -298,6 +299,14 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   final List<Widget Function()> _stack = <Widget Function()>[];
 
   int _planCounter = 0;
+
+  /// Draws the concrete subject a free plan shows BEFORE it is written.
+  ///
+  /// Without this, a planned card says `Anything` and `Change it` opens onto a
+  /// blank decision: the reader cannot tell two plans apart, so changing one is
+  /// meaningless. The draw is local and free, and the card carries the sentence
+  /// all the way to the writer.
+  final SubjectSuggester _suggester = SubjectSuggester();
   bool _booted = false;
   bool _noticeShown = false;
   String? _openId;
@@ -831,12 +840,27 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// surprising anyone, and variety is the one thing a reading app can offer
   /// for free. `_randomBand` excludes `custom`, which has no number of its own
   /// until a reader types one.
-  QueueSlot _freePlan() {
+  ///
+  /// The SUBJECT is drawn here too — locally, for free, from
+  /// [kSuggestedSubjects]. That is what makes `Change it` mean anything: the
+  /// card shows the exact sentence the writer will be given, so the reader can
+  /// keep it, edit it, or replace it with one of their own. [avoid] carries
+  /// whatever the caller knows must not be drawn again (the plan being
+  /// replaced); the queue's other planned cards are excluded automatically.
+  QueueSlot _freePlan({Iterable<String> avoid = const <String>[]}) {
     _planCounter++;
     final LengthBand band = _randomBand();
+    final Set<String> blocked = <String>{
+      ...avoid,
+      for (final QueueSlot s in _queue?.slots ?? const <QueueSlot>[])
+        if (s.isPlanned && s.instruction.trim().isNotEmpty) s.instruction,
+    };
+    final String subject = _suggester.next(avoid: blocked);
     return QueueSlot(
       articleId: 'plan-${DateTime.now().millisecondsSinceEpoch}-$_planCounter',
       state: SlotState.planned,
+      instruction: subject,
+      instructionId: kSuggestedInstructionId,
       plannedWords: _plan.wordsFor(band),
       plannedBand: band,
     );
@@ -1782,10 +1806,21 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     final int words =
         band == LengthBand.custom ? req.exactWords : _plan.wordsFor(band);
 
+    // A suggestion stays a suggestion only while its text is unchanged. An
+    // edited sentence is the reader's instruction, not the app's proposal, and
+    // the card's note has to say which one it is.
+    final bool stillSuggested = slot.isSuggested &&
+        req.instruction.trim() == slot.instruction.trim() &&
+        req.instructionId == null;
     q.editPlan(
       index,
       instruction: req.instruction,
-      instructionId: req.instructionId,
+      instructionId:
+          stillSuggested ? kSuggestedInstructionId : req.instructionId,
+      // `fromSaved` is what keeps a non-null id; without it, picking a saved
+      // instruction in this sheet silently dropped its id and the manager's
+      // "most recently used" order never moved.
+      fromSaved: stillSuggested || req.instructionId != null,
       words: words,
       band: band,
     );
@@ -1807,19 +1842,24 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// the second one would silently overwrite the first if the retire then
   /// failed.
   Future<void> _writeAgain(Queue q, int index) async {
-    // Ask FIRST, before anything is retired or paid for. The old article is
-    // still on screen while the sheet is open, and a reader who backs out has
-    // changed nothing and spent nothing — which is what cancel has to mean.
+    // The replacement is drawn FIRST, so the sheet can show the reader what the
+    // new card would otherwise be about. "Write a new one" with an empty box
+    // asks the reader to invent a subject on the spot while the old article is
+    // still on screen; a suggestion is something to accept, edit, or reject.
+    final QueueSlot replacement = _freePlan();
+    // Ask before anything is retired or paid for. The old article is still on
+    // screen while the sheet is open, and a reader who backs out has changed
+    // nothing and spent nothing — which is what cancel has to mean.
     final List<Instruction> saved =
         await _repo.instructions(limit: kRecentInstructions);
     if (!mounted) return;
     final PlanRequest? req = await AppSheet.show<PlanRequest>(
       context,
       builder: (BuildContext ctx) => RegenerateSheet(
-        initialInstruction: '',
-        initialInstructionId: null,
-        initialBand: LengthBand.medium,
-        initialWords: 0,
+        initialInstruction: replacement.instruction,
+        initialInstructionId: replacement.instructionId,
+        initialBand: replacement.plannedBand,
+        initialWords: replacement.plannedWords,
         plan: _plan,
         instructions: saved,
         onSeeAll: () => _push(() => _settings(pane: Pane.instructions)),
@@ -1827,7 +1867,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     );
     if (req == null || !mounted) return;
 
-    final Article? retired = q.retireReadySlot(index, _freePlan());
+    final Article? retired = q.retireReadySlot(index, replacement);
     if (retired == null) {
       // Planned already — the row should not have been offered, but a menu is
       // not a lock and this is one line.
@@ -1860,6 +1900,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       index,
       instruction: req.instruction,
       instructionId: req.instructionId,
+      // A saved instruction picked here must keep its id; `editPlan` drops
+      // anything not marked `fromSaved`, and that silently stopped the
+      // instruction manager from recording the use.
+      fromSaved: req.instructionId != null,
       words: words,
       band: band,
     );
@@ -2226,8 +2270,9 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
     // The instruction was used. Recording it is what makes the picker's order
     // mean anything — "most recently used" is a fact this line creates.
-    if (slot.instructionId != null) {
-      unawaited(_repo.touchInstruction(slot.instructionId!, todayDay()));
+    final String? instructionId = slot.instructionId;
+    if (instructionId != null && instructionId != kSuggestedInstructionId) {
+      unawaited(_repo.touchInstruction(instructionId, todayDay()));
     }
 
     // The article exists from here on. A failure below is a STORAGE failure.
@@ -2628,7 +2673,9 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       Toast.show(context, 'a write is in flight · it lands in a moment');
       return;
     }
-    q.reroll(index, _freePlan());
+    // Never draw the subject that is already on the card: "another plan" that
+    // says the same sentence is indistinguishable from a dead button.
+    q.reroll(index, _freePlan(avoid: <String>[q.slots[index].instruction]));
     _repo.saveQueue(q);
     setState(() {});
     Toast.show(context, 'a different plan · nothing was paid for');
@@ -2678,9 +2725,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // says `Anything` while five photographs were attached to it is a card
     // lying about its own state.
     //
-    // A reader who typed something keeps it: their words outrank the intent,
-    // and the intent is told to the model through the pictures themselves.
-    if (slot.instruction.trim().isEmpty) {
+    // A reader who typed something keeps it: their words outrank the intent.
+    // But an app SUGGESTION does not: the photograph is now the request, and
+    // leaving "Why a mirror never swaps your left and right" above a word-list
+    // screenshot would tell the writer to ignore the picture. The suggestion is
+    // replaced, not overlaid.
+    if (slot.instruction.trim().isEmpty || slot.isSuggested) {
       q.editPlan(index, instruction: 'from ${req.intent.short}');
       await _repo.saveQueue(q);
       if (!mounted) return;

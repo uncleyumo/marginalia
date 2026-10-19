@@ -119,8 +119,13 @@ class _RegenerateSheetState extends State<RegenerateSheet> {
     // nowhere saved — a hand-typed one, or nothing at all with no saved pick
     // made yet. Opening straight into the saved list when there IS one is the
     // common case: the reader is reusing something that worked.
-    _typing = widget.initialInstruction.isNotEmpty &&
-        widget.initialInstructionId == null;
+    // A subject with no SAVED id — a hand-typed one, or a suggestion the app
+    // put on the card — opens in the text field, prefilled. That is the whole
+    // point of a visible suggestion: "Change it" must show the reader what they
+    // are changing, not an empty box beside a list of unrelated instructions.
+    final bool fromSaved = widget.initialInstructionId != null &&
+        widget.instructions.any((Instruction i) => i.id == widget.initialInstructionId);
+    _typing = widget.initialInstruction.isNotEmpty && !fromSaved;
     _text.text = widget.initialInstruction;
   }
 

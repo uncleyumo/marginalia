@@ -139,17 +139,22 @@ class _PictureSheetState extends State<PictureSheet> {
       _problem = null;
     });
     try {
-      final List<XFile> picked = await _picker.pickMultiImage(
-        limit: _kPickLimit - _pictures.length,
-        imageQuality: 92,
-      );
-      if (picked.isEmpty && source == ImageSource.camera) {
-        // The camera path is a single shot, so it comes back as one file.
+      // HONOUR THE SOURCE. The old code always called `pickMultiImage` (the
+      // gallery) and only fell back to the camera when the gallery came back
+      // empty, so "Take one" opened the photo picker first. On a phone with no
+      // gallery app it looked like a dead button. One source, one call.
+      final List<XFile> picked;
+      if (source == ImageSource.camera) {
         final XFile? shot = await _picker.pickImage(
           source: ImageSource.camera,
           imageQuality: 92,
         );
-        if (shot != null) picked.add(shot);
+        picked = shot == null ? <XFile>[] : <XFile>[shot];
+      } else {
+        picked = await _picker.pickMultiImage(
+          limit: _kPickLimit - _pictures.length,
+          imageQuality: 92,
+        );
       }
       if (picked.isEmpty) return;
 
@@ -264,7 +269,8 @@ class _PictureSheetState extends State<PictureSheet> {
             children: <Widget>[
               Expanded(
                 child: Btn(
-                  label: _busy ? 'Reading them…' : 'Pick from the gallery',
+                  // Short enough to fit half the sheet beside "Take one".
+                  label: _busy ? 'Reading them…' : 'From gallery',
                   icon: '▤',
                   dense: true,
                   busy: _busy,
@@ -275,15 +281,22 @@ class _PictureSheetState extends State<PictureSheet> {
                 ),
               ),
               const SizedBox(width: Gap.xs),
-              Btn(
-                label: 'Take one',
-                icon: '◉',
-                dense: true,
-                busy: _busy,
-                primary: false,
-                onPressed: _busy || _full
-                    ? null
-                    : () => _pick(ImageSource.camera),
+              // Expanded, BECAUSE `Btn` IS `SizedBox(width: double.infinity)`.
+              // As a bare child of a Row it was given an infinite width and the
+              // whole sheet failed layout — the barrier appeared over the queue
+              // and the sheet itself painted as nothing. This is the bug behind
+              // "the picture button does not work".
+              Expanded(
+                child: Btn(
+                  label: 'Take one',
+                  icon: '◉',
+                  dense: true,
+                  busy: _busy,
+                  primary: false,
+                  onPressed: _busy || _full
+                      ? null
+                      : () => _pick(ImageSource.camera),
+                ),
               ),
             ],
           ),
@@ -328,20 +341,29 @@ class _PictureSheetState extends State<PictureSheet> {
           Btn(
             label: _pictures.isEmpty
                 ? 'Pick a picture first'
-                : 'Attach ${_pictures.length} · then Write it',
+                : (_intent == null
+                    ? 'Choose what they are above'
+                    : 'Attach ${_pictures.length} · then Write it'),
             primary: true,
-            // A picture with no intent is a picture the model has to guess
-            // about, and guessing wrong costs the reader the whole write. So
-            // both are required — the intent is one tap and the alternative is
-            // an article about the wrong thing.
-            onPressed: (_pictures.isEmpty || _intent == null || _busy)
+            // THE EMPTY STATE IS A BUTTON, not a dead control. "Pick a
+            // picture first" used to be permanently disabled, which is a
+            // sentence describing an action the reader cannot take from the
+            // place that says it. It now opens the gallery itself; the camera
+            // has its own button beside it.
+            onPressed: _busy
                 ? null
-                : () => Navigator.of(context).pop(
-                      PictureRequest(
-                        pictures: List<Picture>.of(_pictures),
-                        intent: _intent!,
-                      ),
-                    ),
+                : _pictures.isEmpty
+                    ? () => _pick(ImageSource.gallery)
+                    // A picture with no intent is a picture the model has to
+                    // guess about, and guessing wrong costs the whole write.
+                    : (_intent == null
+                        ? null
+                        : () => Navigator.of(context).pop(
+                              PictureRequest(
+                                pictures: List<Picture>.of(_pictures),
+                                intent: _intent!,
+                              ),
+                            )),
           ),
         ],
       ),

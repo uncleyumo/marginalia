@@ -264,7 +264,11 @@ reader paid for. Take the idea or the vocabulary and write something new.
     //                       model cheerfully ignores the pictures entirely.
     //   words only        — unchanged, and the ordinary case.
     if (instruction.trim().isNotEmpty) {
-      b.writeln('The reader asked for this specifically:');
+      // The card may carry a sentence the reader typed OR a subject the app
+      // suggested and they kept. Both are the article's subject; claiming the
+      // reader wrote it would be a lie to the model, and a model that thinks it
+      // is honouring a personal request writes a narrower piece.
+      b.writeln('The card for this article says it is about:');
       b.writeln('«${instruction.trim()}»');
       if (pictures.isNotEmpty) {
         b.writeln('They also attached ${pictures.length} '

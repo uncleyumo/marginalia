@@ -229,10 +229,12 @@ class Queue {
   /// difference between "I must choose" and "show me another and I will decide
   /// later" is the difference between a chore and a queue you keep.
   ///
-  /// Note what it CLEARS: the instruction. A reroll means "not this, something
-  /// else", and keeping the reader's sentence while changing only the length
-  /// would be a reroll that rerolls nothing. A reader who wants the same
-  /// instruction with a different length is editing the card, not rerolling it.
+  /// The replacement carries the whole plan, INCLUDING its subject. It used to
+  /// drop `instruction`, which made a reroll always land on `Anything` even
+  /// when the replacement had a concrete, visible subject on it. A reroll means
+  /// "not this one, something else" — so the something else has to arrive with
+  /// its own sentence, or the card is asking the reader to choose between two
+  /// anonymous plans.
   QueueSlot? reroll(int index, QueueSlot replacement) {
     if (index < 0 || index >= _slots.length) return null;
     // A reroll is a different plan, so it takes the replacement's fresh id.
@@ -243,6 +245,8 @@ class Queue {
       articleId: replacement.articleId,
       state: SlotState.planned,
       article: null,
+      instruction: replacement.instruction,
+      instructionId: replacement.instructionId,
       plannedWords: replacement.plannedWords,
       plannedBand: replacement.plannedBand,
     );

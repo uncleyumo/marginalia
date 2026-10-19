@@ -219,6 +219,11 @@ class SentenceAudio implements SentencePlayer {
   /// the Listen screen can name it rather than saying "the phone's voice".
   String _deviceVoiceName = '';
 
+  /// A voice choice is in flight. Two callers can race here (a recorded
+  /// narrator's fallback and the first sentence), and both doing `getVoices`
+  /// and `setVoice` is harmless but wasteful; the flag keeps it to one.
+  bool _choosingVoice = false;
+
   bool _sessionReady = false;
 
   @override
@@ -354,8 +359,13 @@ class SentenceAudio implements SentencePlayer {
     } catch (e) {
       debugPrint('tts configure failed: $e');
     }
-    // A voice is chosen before the first sentence, not left to the platform.
-    await _ensureDeviceVoice();
+    // DO NOT call `_ensureDeviceVoice` from here. That method awaits
+    // `_ttsReady` (this very future) before touching the engine, so calling it
+    // from inside the configuration deadlocked: `_ttsReady` waited for
+    // `_ensureDeviceVoice`, and `_ensureDeviceVoice` waited for `_ttsReady`.
+    // Nothing that awaited TTS ever resumed — `Say it` and the Listen player
+    // both sat there silently. The voice is chosen on the first real speak
+    // (`_speak` / `speakWord`), which is still before the first word.
   }
 
   /// Pick the voice the phone will speak with, and set it.
@@ -377,7 +387,8 @@ class SentenceAudio implements SentencePlayer {
   ///
   /// Idempotent, and cheap after the first call: the answer is remembered.
   Future<void> _ensureDeviceVoice() async {
-    if (_deviceVoiceName.isNotEmpty) return;
+    if (_deviceVoiceName.isNotEmpty || _choosingVoice) return;
+    _choosingVoice = true;
     try {
       await _ttsReady;
       final Object? raw = await _tts.getVoices;
@@ -406,6 +417,8 @@ class SentenceAudio implements SentencePlayer {
       // A phone that will not list its voices still speaks. The label falls
       // back to the generic sentence, which is better than a dead player.
       debugPrint('the device voice could not be chosen: $e');
+    } finally {
+      _choosingVoice = false;
     }
   }
 
@@ -481,18 +494,33 @@ class SentenceAudio implements SentencePlayer {
   /// Speak one word. Used by the word sheet's Say it, and it must work with no
   /// key at all — which it does, because the device engine is the floor.
   Future<bool> speakWord(String word, {double rate = 0.42}) async {
+    final String text = word.trim();
+    if (text.isEmpty) return false;
     await stop();
     try {
-      // The language and the completion flag must be set before the first word,
-      // not concurrently with it.
+      // The same prerequisites as a sentence: an audio session, a completed
+      // configuration, and a CHOSEN voice. Without the voice this spoke with
+      // the platform default while the Listen screen used the selected one —
+      // two different speakers for the same word.
+      await _ensureSession();
       await _ttsReady;
+      await _ensureDeviceVoice();
       await _tts.setSpeechRate(rate);
-      await _tts.speak(word);
-      await _tts.setSpeechRate(0.44);
-      return true;
+      final Object? result = await _tts.speak(text);
+      // flutter_tts answers 1 on success and 0/false when the engine refused
+      // (no voice pack, speech service disabled). Returning true regardless was
+      // why the reader saw no sound and no explanation.
+      return result != 0 && result != false;
     } catch (e) {
       debugPrint('speakWord failed: $e');
       return false;
+    } finally {
+      try {
+        await _tts.setSpeechRate(0.44);
+      } catch (_) {
+        // Restoring the article rate is best effort; a failed restore must not
+        // turn a spoken word into a reported failure.
+      }
     }
   }
 

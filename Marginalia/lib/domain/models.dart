@@ -291,6 +291,14 @@ class DayLogRow {
   int minutes;
 }
 
+/// The `instructionId` carried by a plan whose subject was SUGGESTED locally.
+///
+/// It is a sentinel rather than a saved-instruction id: `ins-…` ids are minted
+/// by the instructions table and can never equal this, and the card needs to
+/// say "a suggestion · change it or write your own" instead of claiming the
+/// reader typed it. The shell skips `touchInstruction` for it.
+const String kSuggestedInstructionId = 'suggested';
+
 /// One slot in the queue. Exactly one of [state] and the article fields is
 /// meaningful, and which one is stated by [state] — not inferred from nulls.
 class QueueSlot {
@@ -361,6 +369,13 @@ class QueueSlot {
   /// missing data — which is why it gets a NAME on the card instead of a blank.
   bool get isFreePick => instruction.trim().isEmpty;
 
+  /// The subject was proposed by the app, not typed or chosen by the reader.
+  ///
+  /// The label still shows it, because a plan the reader cannot see is a plan
+  /// they cannot decide about — the whole point of the suggestion.
+  bool get isSuggested =>
+      !isFreePick && instructionId == kSuggestedInstructionId;
+
   /// The label a planned card carries in its title position.
   ///
   /// An instruction can be a whole sentence, so it is the reader's own words
@@ -372,7 +387,9 @@ class QueueSlot {
   /// place the card distinguishes "you asked for this" from "the writer chose".
   String get subjectNote => isFreePick
       ? 'the writer picks the subject'
-      : (instructionId == null ? 'your instruction' : 'a saved instruction');
+      : isSuggested
+          ? 'suggested for you · change it or write your own'
+          : (instructionId == null ? 'your instruction' : 'a saved instruction');
 
   /// What a planned card says about length. The number is what will be asked
   /// for; the band is where it came from, and saying both is what keeps the

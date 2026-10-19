@@ -145,8 +145,11 @@
 
 计划卡的标题位置显示的是**这篇文章准备写什么**：
 
-- `Anything` + `the writer picks the subject` = 没有指定，AI 自己挑一个
+- 一句具体的话 + `suggested for you · change it or write your own` = **App 已经替你抽好了一个具体主题**。你不用猜，看到不喜欢就换
 - 一句你自己的话 + `your instruction` = 你指定的
+- `Anything` + `the writer picks the subject` = 只有你主动选 `You decide` 时才会出现
+
+主题是在建计划卡时**本地、免费**抽出来的，不调用模型、不花钱。所以 `Change it` 一打开就是你卡上那句话，可以直接改；`↻` 则是连主题和长度一起换一张新的。
 
 ### 卡片上的两个按钮
 
@@ -165,7 +168,8 @@
    - `A good sentence` —— 文章写这句话**讲的意思**，不用它的原话
    - `A scene` —— 文章描写照片里的场景
    - `A word list` —— 文章把这些词**用进真实的句子里**（这是背单词截图的正解）
-2. **选图**：`Pick from the gallery` 一次最多 5 张，或 `Take one` 现拍一张。
+2. **选图**：`From gallery` 一次最多 5 张，或 `Take one` 现拍一张。还没选图时，底部那个
+   `Pick a picture first` **本身就是相册快捷键**，点它就会打开相册，不是死的。
 3. 点 `Attach N · then Write it`，会**回到卡片**，再点一次 `Write it` 才真正开始写、才花钱。
 
 几点说明：

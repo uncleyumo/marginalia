@@ -161,6 +161,10 @@ reader paid for. Take the idea or the vocabulary and write something new.
     List<NewsItem> news = const <NewsItem>[],
     List<String> recentTitles = const <String>[],
     List<String> metWords = const <String>[],
+    // Words the reader starred and still owes showings for. Unlike `metWords`,
+    // which is an offer, every word here MUST appear: a star is a promise the
+    // app has to keep countable.
+    List<String> mustUseWords = const <String>[],
     List<Picture> pictures = const <Picture>[],
     AgentLoop? agent,
     void Function(AgentResult)? onResult,
@@ -172,6 +176,7 @@ reader paid for. Take the idea or the vocabulary and write something new.
       news: news,
       recentTitles: recentTitles,
       metWords: metWords,
+      mustUseWords: mustUseWords,
       pictures: pictures,
     );
 
@@ -234,6 +239,7 @@ reader paid for. Take the idea or the vocabulary and write something new.
     required List<NewsItem> news,
     required List<String> recentTitles,
     required List<String> metWords,
+    required List<String> mustUseWords,
     required List<Picture> pictures,
   }) {
     final StringBuffer b = StringBuffer();
@@ -312,6 +318,21 @@ reader paid for. Take the idea or the vocabulary and write something new.
     // is the second copy of the truth this project refuses to keep.
     b.write(plan.toPrompt());
     b.writeln();
+
+    // A star is a PROMISE, so its words are stated separately and without the
+    // optional wording below. "Use four to six of them" is exactly what must
+    // not be said about a word the reader asked for twice.
+    if (mustUseWords.isNotEmpty) {
+      b.writeln('The reader asked to meet these words again. EACH of them must '
+          'appear at least once, in a natural sentence. An ordinary inflection '
+          '(plural, past tense, -ing, adverb) counts; a different word does '
+          'not. Do not list them, do not translate them, do not define them — '
+          'just use them:');
+      for (final String w in mustUseWords) {
+        b.writeln('- $w');
+      }
+      b.writeln();
+    }
 
     if (metWords.isNotEmpty) {
       b.writeln('This reader recently met these words: ${metWords.join(', ')}.');

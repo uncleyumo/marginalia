@@ -1393,6 +1393,22 @@ class $WordRowsTable extends WordRows with TableInfo<$WordRowsTable, WordRow> {
       defaultConstraints:
           GeneratedColumn.constraintIsAlways('CHECK ("starred" IN (0, 1))'),
       defaultValue: const Constant(false));
+  static const VerificationMeta _starCountMeta =
+      const VerificationMeta('starCount');
+  @override
+  late final GeneratedColumn<int> starCount = GeneratedColumn<int>(
+      'star_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _starDeliveredMeta =
+      const VerificationMeta('starDelivered');
+  @override
+  late final GeneratedColumn<int> starDelivered = GeneratedColumn<int>(
+      'star_delivered', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
   static const VerificationMeta _starredAtDayMeta =
       const VerificationMeta('starredAtDay');
   @override
@@ -1406,8 +1422,15 @@ class $WordRowsTable extends WordRows with TableInfo<$WordRowsTable, WordRow> {
       'last_met_day', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
   @override
-  List<GeneratedColumn> get $columns =>
-      [lemma, encounters, starred, starredAtDay, lastMetDay];
+  List<GeneratedColumn> get $columns => [
+        lemma,
+        encounters,
+        starred,
+        starCount,
+        starDelivered,
+        starredAtDay,
+        lastMetDay
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -1433,6 +1456,16 @@ class $WordRowsTable extends WordRows with TableInfo<$WordRowsTable, WordRow> {
     if (data.containsKey('starred')) {
       context.handle(_starredMeta,
           starred.isAcceptableOrUnknown(data['starred']!, _starredMeta));
+    }
+    if (data.containsKey('star_count')) {
+      context.handle(_starCountMeta,
+          starCount.isAcceptableOrUnknown(data['star_count']!, _starCountMeta));
+    }
+    if (data.containsKey('star_delivered')) {
+      context.handle(
+          _starDeliveredMeta,
+          starDelivered.isAcceptableOrUnknown(
+              data['star_delivered']!, _starDeliveredMeta));
     }
     if (data.containsKey('starred_at_day')) {
       context.handle(
@@ -1461,6 +1494,10 @@ class $WordRowsTable extends WordRows with TableInfo<$WordRowsTable, WordRow> {
           .read(DriftSqlType.int, data['${effectivePrefix}encounters'])!,
       starred: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}starred'])!,
+      starCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}star_count'])!,
+      starDelivered: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}star_delivered'])!,
       starredAtDay: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}starred_at_day']),
       lastMetDay: attachedDatabase.typeMapping
@@ -1477,13 +1514,24 @@ class $WordRowsTable extends WordRows with TableInfo<$WordRowsTable, WordRow> {
 class WordRow extends DataClass implements Insertable<WordRow> {
   final String lemma;
   final int encounters;
+
+  /// Whether a star campaign is still running. Kept as a column as well as the
+  /// quota below because it is what the Words screen groups by, and a row from
+  /// an older build reaches the app with only this flag set.
   final bool starred;
+
+  /// Lifetime star taps, and showings already delivered in the current
+  /// campaign. [starCount] − [starDelivered] is what is still owed.
+  final int starCount;
+  final int starDelivered;
   final String? starredAtDay;
   final String? lastMetDay;
   const WordRow(
       {required this.lemma,
       required this.encounters,
       required this.starred,
+      required this.starCount,
+      required this.starDelivered,
       this.starredAtDay,
       this.lastMetDay});
   @override
@@ -1492,6 +1540,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
     map['lemma'] = Variable<String>(lemma);
     map['encounters'] = Variable<int>(encounters);
     map['starred'] = Variable<bool>(starred);
+    map['star_count'] = Variable<int>(starCount);
+    map['star_delivered'] = Variable<int>(starDelivered);
     if (!nullToAbsent || starredAtDay != null) {
       map['starred_at_day'] = Variable<String>(starredAtDay);
     }
@@ -1506,6 +1556,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
       lemma: Value(lemma),
       encounters: Value(encounters),
       starred: Value(starred),
+      starCount: Value(starCount),
+      starDelivered: Value(starDelivered),
       starredAtDay: starredAtDay == null && nullToAbsent
           ? const Value.absent()
           : Value(starredAtDay),
@@ -1522,6 +1574,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
       lemma: serializer.fromJson<String>(json['lemma']),
       encounters: serializer.fromJson<int>(json['encounters']),
       starred: serializer.fromJson<bool>(json['starred']),
+      starCount: serializer.fromJson<int>(json['starCount']),
+      starDelivered: serializer.fromJson<int>(json['starDelivered']),
       starredAtDay: serializer.fromJson<String?>(json['starredAtDay']),
       lastMetDay: serializer.fromJson<String?>(json['lastMetDay']),
     );
@@ -1533,6 +1587,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
       'lemma': serializer.toJson<String>(lemma),
       'encounters': serializer.toJson<int>(encounters),
       'starred': serializer.toJson<bool>(starred),
+      'starCount': serializer.toJson<int>(starCount),
+      'starDelivered': serializer.toJson<int>(starDelivered),
       'starredAtDay': serializer.toJson<String?>(starredAtDay),
       'lastMetDay': serializer.toJson<String?>(lastMetDay),
     };
@@ -1542,12 +1598,16 @@ class WordRow extends DataClass implements Insertable<WordRow> {
           {String? lemma,
           int? encounters,
           bool? starred,
+          int? starCount,
+          int? starDelivered,
           Value<String?> starredAtDay = const Value.absent(),
           Value<String?> lastMetDay = const Value.absent()}) =>
       WordRow(
         lemma: lemma ?? this.lemma,
         encounters: encounters ?? this.encounters,
         starred: starred ?? this.starred,
+        starCount: starCount ?? this.starCount,
+        starDelivered: starDelivered ?? this.starDelivered,
         starredAtDay:
             starredAtDay.present ? starredAtDay.value : this.starredAtDay,
         lastMetDay: lastMetDay.present ? lastMetDay.value : this.lastMetDay,
@@ -1558,6 +1618,10 @@ class WordRow extends DataClass implements Insertable<WordRow> {
       encounters:
           data.encounters.present ? data.encounters.value : this.encounters,
       starred: data.starred.present ? data.starred.value : this.starred,
+      starCount: data.starCount.present ? data.starCount.value : this.starCount,
+      starDelivered: data.starDelivered.present
+          ? data.starDelivered.value
+          : this.starDelivered,
       starredAtDay: data.starredAtDay.present
           ? data.starredAtDay.value
           : this.starredAtDay,
@@ -1572,6 +1636,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
           ..write('lemma: $lemma, ')
           ..write('encounters: $encounters, ')
           ..write('starred: $starred, ')
+          ..write('starCount: $starCount, ')
+          ..write('starDelivered: $starDelivered, ')
           ..write('starredAtDay: $starredAtDay, ')
           ..write('lastMetDay: $lastMetDay')
           ..write(')'))
@@ -1579,8 +1645,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
   }
 
   @override
-  int get hashCode =>
-      Object.hash(lemma, encounters, starred, starredAtDay, lastMetDay);
+  int get hashCode => Object.hash(lemma, encounters, starred, starCount,
+      starDelivered, starredAtDay, lastMetDay);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1588,6 +1654,8 @@ class WordRow extends DataClass implements Insertable<WordRow> {
           other.lemma == this.lemma &&
           other.encounters == this.encounters &&
           other.starred == this.starred &&
+          other.starCount == this.starCount &&
+          other.starDelivered == this.starDelivered &&
           other.starredAtDay == this.starredAtDay &&
           other.lastMetDay == this.lastMetDay);
 }
@@ -1596,6 +1664,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
   final Value<String> lemma;
   final Value<int> encounters;
   final Value<bool> starred;
+  final Value<int> starCount;
+  final Value<int> starDelivered;
   final Value<String?> starredAtDay;
   final Value<String?> lastMetDay;
   final Value<int> rowid;
@@ -1603,6 +1673,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
     this.lemma = const Value.absent(),
     this.encounters = const Value.absent(),
     this.starred = const Value.absent(),
+    this.starCount = const Value.absent(),
+    this.starDelivered = const Value.absent(),
     this.starredAtDay = const Value.absent(),
     this.lastMetDay = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -1611,6 +1683,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
     required String lemma,
     this.encounters = const Value.absent(),
     this.starred = const Value.absent(),
+    this.starCount = const Value.absent(),
+    this.starDelivered = const Value.absent(),
     this.starredAtDay = const Value.absent(),
     this.lastMetDay = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -1619,6 +1693,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
     Expression<String>? lemma,
     Expression<int>? encounters,
     Expression<bool>? starred,
+    Expression<int>? starCount,
+    Expression<int>? starDelivered,
     Expression<String>? starredAtDay,
     Expression<String>? lastMetDay,
     Expression<int>? rowid,
@@ -1627,6 +1703,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
       if (lemma != null) 'lemma': lemma,
       if (encounters != null) 'encounters': encounters,
       if (starred != null) 'starred': starred,
+      if (starCount != null) 'star_count': starCount,
+      if (starDelivered != null) 'star_delivered': starDelivered,
       if (starredAtDay != null) 'starred_at_day': starredAtDay,
       if (lastMetDay != null) 'last_met_day': lastMetDay,
       if (rowid != null) 'rowid': rowid,
@@ -1637,6 +1715,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
       {Value<String>? lemma,
       Value<int>? encounters,
       Value<bool>? starred,
+      Value<int>? starCount,
+      Value<int>? starDelivered,
       Value<String?>? starredAtDay,
       Value<String?>? lastMetDay,
       Value<int>? rowid}) {
@@ -1644,6 +1724,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
       lemma: lemma ?? this.lemma,
       encounters: encounters ?? this.encounters,
       starred: starred ?? this.starred,
+      starCount: starCount ?? this.starCount,
+      starDelivered: starDelivered ?? this.starDelivered,
       starredAtDay: starredAtDay ?? this.starredAtDay,
       lastMetDay: lastMetDay ?? this.lastMetDay,
       rowid: rowid ?? this.rowid,
@@ -1661,6 +1743,12 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
     }
     if (starred.present) {
       map['starred'] = Variable<bool>(starred.value);
+    }
+    if (starCount.present) {
+      map['star_count'] = Variable<int>(starCount.value);
+    }
+    if (starDelivered.present) {
+      map['star_delivered'] = Variable<int>(starDelivered.value);
     }
     if (starredAtDay.present) {
       map['starred_at_day'] = Variable<String>(starredAtDay.value);
@@ -1680,6 +1768,8 @@ class WordRowsCompanion extends UpdateCompanion<WordRow> {
           ..write('lemma: $lemma, ')
           ..write('encounters: $encounters, ')
           ..write('starred: $starred, ')
+          ..write('starCount: $starCount, ')
+          ..write('starDelivered: $starDelivered, ')
           ..write('starredAtDay: $starredAtDay, ')
           ..write('lastMetDay: $lastMetDay, ')
           ..write('rowid: $rowid')
@@ -4014,6 +4104,8 @@ typedef $$WordRowsTableCreateCompanionBuilder = WordRowsCompanion Function({
   required String lemma,
   Value<int> encounters,
   Value<bool> starred,
+  Value<int> starCount,
+  Value<int> starDelivered,
   Value<String?> starredAtDay,
   Value<String?> lastMetDay,
   Value<int> rowid,
@@ -4022,6 +4114,8 @@ typedef $$WordRowsTableUpdateCompanionBuilder = WordRowsCompanion Function({
   Value<String> lemma,
   Value<int> encounters,
   Value<bool> starred,
+  Value<int> starCount,
+  Value<int> starDelivered,
   Value<String?> starredAtDay,
   Value<String?> lastMetDay,
   Value<int> rowid,
@@ -4044,6 +4138,12 @@ class $$WordRowsTableFilterComposer
 
   ColumnFilters<bool> get starred => $composableBuilder(
       column: $table.starred, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get starCount => $composableBuilder(
+      column: $table.starCount, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get starDelivered => $composableBuilder(
+      column: $table.starDelivered, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<String> get starredAtDay => $composableBuilder(
       column: $table.starredAtDay, builder: (column) => ColumnFilters(column));
@@ -4070,6 +4170,13 @@ class $$WordRowsTableOrderingComposer
   ColumnOrderings<bool> get starred => $composableBuilder(
       column: $table.starred, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<int> get starCount => $composableBuilder(
+      column: $table.starCount, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get starDelivered => $composableBuilder(
+      column: $table.starDelivered,
+      builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<String> get starredAtDay => $composableBuilder(
       column: $table.starredAtDay,
       builder: (column) => ColumnOrderings(column));
@@ -4095,6 +4202,12 @@ class $$WordRowsTableAnnotationComposer
 
   GeneratedColumn<bool> get starred =>
       $composableBuilder(column: $table.starred, builder: (column) => column);
+
+  GeneratedColumn<int> get starCount =>
+      $composableBuilder(column: $table.starCount, builder: (column) => column);
+
+  GeneratedColumn<int> get starDelivered => $composableBuilder(
+      column: $table.starDelivered, builder: (column) => column);
 
   GeneratedColumn<String> get starredAtDay => $composableBuilder(
       column: $table.starredAtDay, builder: (column) => column);
@@ -4129,6 +4242,8 @@ class $$WordRowsTableTableManager extends RootTableManager<
             Value<String> lemma = const Value.absent(),
             Value<int> encounters = const Value.absent(),
             Value<bool> starred = const Value.absent(),
+            Value<int> starCount = const Value.absent(),
+            Value<int> starDelivered = const Value.absent(),
             Value<String?> starredAtDay = const Value.absent(),
             Value<String?> lastMetDay = const Value.absent(),
             Value<int> rowid = const Value.absent(),
@@ -4137,6 +4252,8 @@ class $$WordRowsTableTableManager extends RootTableManager<
             lemma: lemma,
             encounters: encounters,
             starred: starred,
+            starCount: starCount,
+            starDelivered: starDelivered,
             starredAtDay: starredAtDay,
             lastMetDay: lastMetDay,
             rowid: rowid,
@@ -4145,6 +4262,8 @@ class $$WordRowsTableTableManager extends RootTableManager<
             required String lemma,
             Value<int> encounters = const Value.absent(),
             Value<bool> starred = const Value.absent(),
+            Value<int> starCount = const Value.absent(),
+            Value<int> starDelivered = const Value.absent(),
             Value<String?> starredAtDay = const Value.absent(),
             Value<String?> lastMetDay = const Value.absent(),
             Value<int> rowid = const Value.absent(),
@@ -4153,6 +4272,8 @@ class $$WordRowsTableTableManager extends RootTableManager<
             lemma: lemma,
             encounters: encounters,
             starred: starred,
+            starCount: starCount,
+            starDelivered: starDelivered,
             starredAtDay: starredAtDay,
             lastMetDay: lastMetDay,
             rowid: rowid,

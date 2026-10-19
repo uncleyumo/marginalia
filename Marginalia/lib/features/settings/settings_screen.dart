@@ -53,10 +53,12 @@ class SettingsModel {
     required this.plan,
     required this.writerId,
     required this.writerBase,
+    required this.writerModel,
     required this.writerKeySaved,
     required this.voiceSource,
     required this.voiceBase,
     required this.voiceName,
+    required this.voiceModel,
     required this.voiceKeySaved,
     required this.deviceVoice,
     required this.appearance,
@@ -82,12 +84,18 @@ class SettingsModel {
   /// Which writer is selected. 'deepseek' | 'openai' | 'mimo'.
   final String writerId;
   final String writerBase;
+
+  /// The model id the reader typed. Empty means the provider default.
+  final String writerModel;
   final bool writerKeySaved;
 
   /// 'device' | 'mimo'.
   final String voiceSource;
   final String voiceBase;
   final String voiceName;
+
+  /// The TTS model id the reader typed. Empty means the provider default.
+  final String voiceModel;
   final bool voiceKeySaved;
   final DeviceVoice deviceVoice;
 
@@ -147,6 +155,19 @@ class SettingsModel {
 
   WriterEndpoint get writer => WriterEndpoint.byId(writerId);
 
+  /// What the request will actually carry. Empty settings fall through to the
+  /// provider's own default, so the rows never show a blank where a model id
+  /// belongs.
+  String get writerModelValue =>
+      writerModel.trim().isEmpty ? writer.model : writerModel.trim();
+
+  String get voiceModelValue => voiceModel.trim().isEmpty
+      ? VoiceEndpoint.mimo.model
+      : voiceModel.trim();
+
+  bool get writerModelCustom => writerModel.trim().isNotEmpty;
+  bool get voiceModelCustom => voiceModel.trim().isNotEmpty;
+
   /// The hub row's value line. States both switches and the order, because a
   /// row that only says "Listening" makes the reader open the pane to learn
   /// something the row could have said — the hub's whole job.
@@ -184,10 +205,12 @@ class SettingsScreen extends StatefulWidget {
     required this.onFace,
     required this.onWriterSelected,
     required this.onWriterBaseChanged,
+    required this.onWriterModelChanged,
     required this.onWriterKeyChanged,
     required this.onVoiceSelected,
     required this.onVoiceBaseChanged,
     required this.onVoiceNameChanged,
+    required this.onVoiceModelChanged,
     required this.onVoiceKeyChanged,
     required this.onListenAutoPlay,
     required this.onListenAutoOrder,
@@ -225,11 +248,13 @@ class SettingsScreen extends StatefulWidget {
 
   final void Function(String id) onWriterSelected;
   final void Function(String base) onWriterBaseChanged;
+  final void Function(String model) onWriterModelChanged;
   final void Function(String key) onWriterKeyChanged;
 
   final void Function(String source) onVoiceSelected;
   final void Function(String base) onVoiceBaseChanged;
   final void Function(String name) onVoiceNameChanged;
+  final void Function(String model) onVoiceModelChanged;
   final void Function(String key) onVoiceKeyChanged;
 
   // ── listening ─────────────────────────────────────────────────────────
@@ -409,7 +434,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     final String writerLine = m.writerKeySaved
-        ? '${m.writer.name} · a key is saved · ${m.writer.costLine}'
+        ? '${m.writer.name} · ${m.writerModelValue} · a key is saved · '
+            '${m.writer.costLine}'
             '${m.writer.supportsVision ? ' · sees pictures' : ''}'
         : 'no key · the app works fully without one';
 
@@ -925,6 +951,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: m.voiceBase,
             onTap: _editVoiceBase,
           ),
+          // Same reasoning as the writer's Model row: the TTS model id is data,
+          // not a build-time constant. Empty means the provider default.
+          _TapRow(
+            label: 'TTS model',
+            value: m.voiceModelCustom
+                ? m.voiceModelValue
+                : '${m.voiceModelValue} · default',
+            onTap: _editVoiceModel,
+          ),
           _TapRow(
             label: 'API key',
             value: m.voiceKeySaved
@@ -986,6 +1021,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (v == null || v.trim().isEmpty || !mounted) return;
     widget.onVoiceBaseChanged(v.trim());
+  }
+
+  Future<void> _editVoiceModel() async {
+    final String? v = await TextPromptSheet.ask(
+      context,
+      title: 'TTS model id',
+      hint: VoiceEndpoint.mimo.model,
+      note: 'The exact model id sent with each spoken sentence. Leave it empty '
+          'to use the provider default (${VoiceEndpoint.mimo.model}).',
+      initial: m.voiceModel,
+      mono: true,
+      saveLabel: 'Use this model',
+    );
+    if (v == null || !mounted) return;
+    widget.onVoiceModelChanged(v.trim());
   }
 
   Future<void> _editVoiceKey() async {
@@ -1210,6 +1260,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           label: 'Base URL',
           value: m.writerBase,
           onTap: () => _editWriterBase(ep),
+        ),
+        // The model id, editable. A provider can add, rename or retire a model
+        // at any time; tying the app to three hard-coded ids meant every new
+        // model needed a new APK. The row shows the effective id, and says
+        // "default" when the reader has not overridden it.
+        _TapRow(
+          label: 'Model',
+          value: m.writerModelCustom
+              ? m.writerModelValue
+              : '${m.writerModelValue} · default',
+          onTap: () => _editWriterModel(ep),
         ),
         _TapRow(
           label: 'API key',
@@ -1620,6 +1681,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (v == null || v.trim().isEmpty || !mounted) return;
     widget.onWriterBaseChanged(v.trim());
+  }
+
+  Future<void> _editWriterModel(WriterEndpoint ep) async {
+    final String? v = await TextPromptSheet.ask(
+      context,
+      title: 'Model id',
+      hint: ep.model,
+      note: 'The exact id sent to ${ep.name}. Leave it empty to use the '
+          'provider default (${ep.model}). New model ids work here without a '
+          'new build — type the id your provider published.',
+      initial: m.writerModel,
+      mono: true,
+      saveLabel: 'Use this model',
+    );
+    // Empty is a real answer: it means "go back to the provider default".
+    if (v == null || !mounted) return;
+    widget.onWriterModelChanged(v.trim());
   }
 
   Future<void> _editWriterKey() async {

@@ -10,8 +10,10 @@
 // would actually check.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/design/tokens.dart';
+import '../core/util/motion.dart';
 
 /// Named `Dest` rather than `Tab`, which Flutter's material library already
 /// has. Two tabs in one file scope is a collision waiting to happen.
@@ -47,16 +49,20 @@ class BottomBar extends StatelessWidget {
           height: 58,
           child: Row(
             children: <Widget>[
-              _item(c, Dest.queue, 'Queue', null),
-              _item(c, Dest.article, 'Article', null),
-              _item(c, Dest.library, 'Library', null),
-              _item(c, Dest.history, 'History', null),
+              _item(context, c, Dest.queue, 'Queue', null),
+              _item(context, c, Dest.article, 'Article', null),
+              _item(context, c, Dest.library, 'Library', null),
+              _item(context, c, Dest.history, 'History', null),
               _item(
+                context,
                 c,
                 Dest.words,
-                // a count, not a label
-                wordsWanting == 0 ? 'Words' : '$wordsWanting',
-                wordsWanting > 0 ? '$wordsWanting words want another look' : null,
+                // The name AND the count. A bare `8` in the last tab read as
+                // a stray badge — nothing on screen said it meant words.
+                wordsWanting == 0 ? 'Words' : 'Words $wordsWanting',
+                wordsWanting > 0
+                    ? '$wordsWanting words want another look'
+                    : null,
               ),
             ],
           ),
@@ -66,27 +72,36 @@ class BottomBar extends StatelessWidget {
   }
 
   Widget _item(
+    BuildContext context,
     Palette c,
     Dest tab,
     String label,
     String? tooltip,
   ) {
     final bool on = tab == current;
-    final Widget label0 = Text(
-      label,
+    final Duration d = motionDuration(context, Ease.fast);
+    // Both the rule and the label animate between states, so switching tabs
+    // reads as a movement rather than a repaint. The values are unchanged —
+    // this is the same mark, arriving instead of appearing.
+    final Widget label0 = AnimatedDefaultTextStyle(
+      duration: d,
+      curve: Ease.outExpo,
       style: TextStyle(
         fontFamily: TypeScale.mono,
         fontSize: on ? 11 : 10,
         color: on ? c.ink : c.ink3,
         fontWeight: on ? FontWeight.w500 : FontWeight.w400,
       ),
+      child: Text(label),
     );
     final Widget child = Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: <Widget>[
         // the active tab is marked by a rule above the label, not by colour
         // alone — it survives a greyscale screenshot
-        Container(
+        AnimatedContainer(
+          duration: d,
+          curve: Ease.outExpo,
           width: on ? 18 : 0,
           height: 2,
           decoration: BoxDecoration(
@@ -99,12 +114,19 @@ class BottomBar extends StatelessWidget {
       ],
     );
 
+    void tap() {
+      // A tab is a physical destination. The tick is the smallest useful
+      // confirmation and costs nothing when the platform has no haptics.
+      HapticFeedback.selectionClick();
+      onSelect(tab);
+    }
+
     return Expanded(
       child: tooltip == null
-          ? InkWell(onTap: () => onSelect(tab), child: child)
+          ? InkWell(onTap: tap, child: child)
           : Tooltip(
               message: tooltip,
-              child: InkWell(onTap: () => onSelect(tab), child: child),
+              child: InkWell(onTap: tap, child: child),
             ),
     );
   }

@@ -43,6 +43,15 @@ local to them (which pane is open, whether a sheet's star is on).
 | `library.dart` | `shelf()`, `ShelfRow`, `Library.search`, `mostRevisited` |
 | `picture.dart` | `Picture`, `PicturePack` — the 2 MB ceiling and the 5-picture cap |
 
+A star is a PROMISE WITH A COUNT, not a boolean. `WordEntry.starCount` is the
+lifetime number of taps and the quota of a campaign; `starDelivered` counts the
+landed articles that actually used the word. `starRemaining` is the difference,
+and zero ends the campaign — the word stops competing for "Crucial now" and
+stops being injected into prompts. The writer receives those words separately
+from the optional "recently met" list, and `_settleStarQuotas` checks the
+article's own text before consuming a showing; a model that ignores the
+instruction must not burn a promise.
+
 The five invariants live in these types, not in comments:
 
 1. The queue is exactly three slots.
@@ -52,6 +61,12 @@ The five invariants live in these types, not in comments:
    `Queue.writeSlot` is reachable only by one.
 4. Reading counts and never removes. `listens` never touches `reads`.
 5. Freeing space changes `kb` and nothing else — counts survive deletion.
+
+`isLearned` in `queue.dart` is what turns counts into "this card has done its
+job": `reads > 0 && listens > 0`. Read-confirm and a full listen are different
+acts, and either one alone leaves the card in the queue. `_reconcileQueue` runs
+the same rule on every ready card at boot and on resume, which is what repairs
+a queue inherited from a build whose rule was different.
 
 Invariant 3 is the one that changed when the app learned to write by itself,
 and it changed in a way worth stating precisely: it now reads "stops

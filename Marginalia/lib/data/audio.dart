@@ -192,6 +192,11 @@ class SentenceAudio implements SentencePlayer {
   String _baseUrl = VoiceEndpoint.mimo.baseUrl;
   String _voice = VoiceEndpoint.mimo.voices.first;
 
+  /// The TTS model id sent with every synthesis. Empty means the provider
+  /// default, so an upgrade that changes the default still reaches a reader
+  /// who never touched this setting.
+  String _model = '';
+
   /// The concrete voice id that will actually be sent to the API.
   ///
   /// Equal to [_voice] unless the reader picked [kVoiceRandom]. Random is a
@@ -258,12 +263,14 @@ class SentenceAudio implements SentencePlayer {
     String apiKey = '',
     String baseUrl = '',
     String voice = '',
+    String model = '',
   }) {
     _configured = source;
     // Optimistic until proven otherwise: the label should name the engine the
     // reader asked for until one actually fails to answer.
     _lastSpoken = source;
     _apiKey = apiKey.trim();
+    _model = model.trim();
     if (baseUrl.trim().isNotEmpty) _baseUrl = baseUrl.trim();
     if (voice.trim().isNotEmpty) {
       _voice = voice.trim();
@@ -494,7 +501,10 @@ class SentenceAudio implements SentencePlayer {
   Future<String?> probeMiMo() async {
     try {
       await _api.testVoice(
-          baseUrl: _baseUrl, apiKey: _apiKey, voice: _speakingAs);
+          baseUrl: _baseUrl,
+          apiKey: _apiKey,
+          voice: _speakingAs,
+          model: _model);
       return null;
     } on RemoteFailure catch (e) {
       return e.message;
@@ -566,7 +576,10 @@ class SentenceAudio implements SentencePlayer {
   ///
   /// A synthesised sentence is a fact about the phone, not about the network:
   /// hearing it again must not cost another request. So the cache is keyed by
-  /// the voice AND the exact words, and a hit never touches the network at all.
+  /// the model, the voice AND the exact words, and a hit never touches the
+  /// network at all. The model is part of the key because changing it can
+  /// change the audio; without it, a reader who switched TTS models would keep
+  /// hearing the old one from disk.
   Future<String?> _cachedRecording(String text,
       {bool urgent = false, int? epoch}) async {
     final File file = await _recordingFile(text);
@@ -617,6 +630,7 @@ class SentenceAudio implements SentencePlayer {
         apiKey: _apiKey,
         text: text,
         voice: _speakingAs,
+        model: _model,
       );
       await file.parent.create(recursive: true);
       final File tmp = File('${file.path}.part');
@@ -679,7 +693,8 @@ class SentenceAudio implements SentencePlayer {
 
   void _releaseSynth() {
     while (_synthWaiters.isNotEmpty) {
-      final ({Completer<void> gate, bool urgent}) next = _synthWaiters.removeAt(0);
+      final ({Completer<void> gate, bool urgent}) next =
+          _synthWaiters.removeAt(0);
       // The slot is transferred rather than returned to the counter, so a
       // waiter wakes already holding it and nobody else can steal it in
       // between.
@@ -739,7 +754,12 @@ class SentenceAudio implements SentencePlayer {
     final Directory base = await getApplicationSupportDirectory();
     final Directory dir = Directory(p.join(base.path, 'voice'));
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    return File(p.join(dir.path, '${_hash('$_speakingAs|$text')}.wav'));
+    // An empty model is the provider default, and stays out of the key so
+    // recordings made before this setting existed are still cache hits. A
+    // custom model prefixes the key, which invalidates only its own audio.
+    final String model = _model.trim();
+    final String prefix = model.isEmpty ? '' : '$model|';
+    return File(p.join(dir.path, '${_hash('$prefix$_speakingAs|$text')}.wav'));
   }
 
   /// FNV-1a. Short, stable, and good enough to tell two sentences apart — this is
@@ -760,8 +780,7 @@ class SentenceAudio implements SentencePlayer {
       await _player.play();
       await _player.processingStateStream.firstWhere(
         (ja.ProcessingState s) =>
-            s == ja.ProcessingState.completed ||
-            s == ja.ProcessingState.idle,
+            s == ja.ProcessingState.completed || s == ja.ProcessingState.idle,
       );
       return true;
     } catch (e) {
@@ -825,6 +844,7 @@ class SentenceAudio implements SentencePlayer {
   }
 
   @override
+
   /// Re-speak the current sentence from its start.
   ///
   /// There is no portable mid-word resume, so this is what "resume" means here —

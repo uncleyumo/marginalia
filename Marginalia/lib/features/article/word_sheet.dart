@@ -43,8 +43,11 @@ class WordSheet extends StatefulWidget {
     required this.surface,
     required this.entry,
     required this.miss,
-    required this.starred,
-    required this.onToggleStar,
+    required this.starrable,
+    required this.starCount,
+    required this.starRemaining,
+    required this.onStar,
+    required this.onUnstar,
     required this.onSpeak,
     this.lemma,
     this.weightFraction,
@@ -55,9 +58,21 @@ class WordSheet extends StatefulWidget {
   final DictEntry entry;
   final LookupMiss miss;
 
-  /// The state as it was when the sheet opened. The sheet then owns it.
-  final bool starred;
-  final void Function(bool next) onToggleStar;
+  /// Whether this word is kept in the reader's pool at all. Function words
+  /// (`the`, `and`) are answered and not recorded, so a star button on one
+  /// would be a control that does nothing — worse than no control.
+  final bool starrable;
+
+  /// The star state as it was when the sheet opened. The sheet then owns the
+  /// local copy so a tap answers on this frame.
+  ///
+  /// [starCount] is LIFETIME taps; [starRemaining] is how many future articles
+  /// still owe this word. A word can be re-starred while it is already starred:
+  /// every tap is a stronger request, not a toggle.
+  final int starCount;
+  final int starRemaining;
+  final VoidCallback onStar;
+  final VoidCallback onUnstar;
   final VoidCallback onSpeak;
 
   /// The dictionary form, when the tapped word was an inflection.
@@ -77,7 +92,9 @@ class WordSheet extends StatefulWidget {
 }
 
 class _WordSheetState extends State<WordSheet> {
-  late bool _starred = widget.starred;
+  late int _starCount = widget.starCount;
+  late int _starRemaining = widget.starRemaining;
+  bool get _starred => _starRemaining > 0;
   bool _showChinese = false;
 
   /// The gloss word whose Chinese panel is open. `cn` and `note` are mutually
@@ -85,12 +102,29 @@ class _WordSheetState extends State<WordSheet> {
   /// A panel with neither would read as the app being broken.
   ({String word, String? cn, String? note})? _gloss;
 
+  /// Every tap ADDS a showing. Tapping a starred word used to turn the star
+  /// off, which made "I really mean it" impossible — and it meant a reader who
+  /// tapped twice lost the request instead of doubling it.
   void _star() {
-    // Flip locally first. The parent's write goes to the database and comes back
-    // through a rebuild it may not have time to do; the reader has already
-    // tapped, so the sheet must answer on this frame.
-    setState(() => _starred = !_starred);
-    widget.onToggleStar(_starred);
+    setState(() {
+      if (_starRemaining > 0) {
+        _starCount++;
+        _starRemaining++;
+      } else {
+        // A new campaign: the lifetime count rises, and that is the quota.
+        _starCount++;
+        _starRemaining = _starCount;
+      }
+    });
+    widget.onStar();
+  }
+
+  void _unstar() {
+    setState(() {
+      _starCount = 0;
+      _starRemaining = 0;
+    });
+    widget.onUnstar();
   }
 
   /// Look up a word tapped inside the English gloss. ONE step only — the panel
@@ -484,30 +518,79 @@ class _WordSheetState extends State<WordSheet> {
                 onTap: widget.onSpeak,
               ),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _ActionBtn(
-                icon: _starred ? Icons.star : Icons.star_border,
-                label: _starred ? 'Starred' : 'Star it',
-                // Vermilion when starred. The star FILLING is the primary
-                // feedback; the colour change is what makes it findable again
-                // when the eye goes back to the sheet.
-                active: _starred,
-                onTap: _star,
+            // Function words are not kept in the pool, so there is nothing
+            // for a star to ask for. Hiding the button is the honest state:
+            // a disabled control would still imply a word list it is not in.
+            if (widget.starrable) ...<Widget>[
+              const SizedBox(width: 8),
+              Expanded(
+                child: _ActionBtn(
+                  icon: _starred ? Icons.star : Icons.star_border,
+                  // While a campaign is running the button ADDS a showing. The
+                  // count is on the button because "starred" alone hides the
+                  // fact that the reader asked for it three times.
+                  label: _starCount > 0 ? 'Star again · $_starCount' : 'Star it',
+                  // Vermilion when starred. The star FILLING is the primary
+                  // feedback; the colour change is what makes it findable again
+                  // when the eye goes back to the sheet.
+                  active: _starred,
+                  onTap: _star,
+                ),
               ),
-            ),
+            ],
           ],
         ),
-        if (_starred) ...<Widget>[
+        if (!_starred && _starCount > 0) ...<Widget>[
           const SizedBox(height: 9),
           Text(
-            'It comes round again sooner. Nothing already written is changed.',
+            'The showing${_starCount == 1 ? '' : 's'} you asked for '
+            '${_starCount == 1 ? 'has' : 'have'} been delivered. Starring again '
+            'will ask for ${_starCount + 1}.',
             style: TextStyle(
               fontFamily: TypeScale.sans,
               fontSize: 11.5,
               height: 1.4,
               color: c.ink3,
             ),
+          ),
+        ],
+        if (_starred) ...<Widget>[
+          const SizedBox(height: 9),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  _starRemaining == 1
+                      ? 'One more article will use it, then it leaves Crucial now.'
+                      : '$_starRemaining more articles will use it, then it leaves Crucial now.',
+                  style: TextStyle(
+                    fontFamily: TypeScale.sans,
+                    fontSize: 11.5,
+                    height: 1.4,
+                    color: c.ink3,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: _unstar,
+                borderRadius: BorderRadius.circular(6),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 4, vertical: 1),
+                  child: Text(
+                    'Stop',
+                    style: TextStyle(
+                      fontFamily: TypeScale.sans,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: c.verm,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
         if (widget.weightFraction != null) ...<Widget>[
@@ -615,8 +698,11 @@ Future<void> showWordSheet(
   required String surface,
   required DictEntry entry,
   required LookupMiss miss,
-  required bool starred,
-  required void Function(bool next) onToggleStar,
+  required bool starrable,
+  required int starCount,
+  required int starRemaining,
+  required VoidCallback onStar,
+  required VoidCallback onUnstar,
   required VoidCallback onSpeak,
   String? lemma,
   double? weightFraction,
@@ -628,8 +714,11 @@ Future<void> showWordSheet(
       surface: surface,
       entry: entry,
       miss: miss,
-      starred: starred,
-      onToggleStar: onToggleStar,
+      starrable: starrable,
+      starCount: starCount,
+      starRemaining: starRemaining,
+      onStar: onStar,
+      onUnstar: onUnstar,
       onSpeak: onSpeak,
       lemma: lemma,
       weightFraction: weightFraction,

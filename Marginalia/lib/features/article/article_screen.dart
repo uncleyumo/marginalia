@@ -274,7 +274,7 @@ class _ArticleScreenState extends State<ArticleScreen> {
           // word count rather than anywhere it could be mistaken for a score.
           <String>[
             '${widget.article.wordCount} words',
-            '${widget.article.minuteEstimate} min',
+            '≈ ${widget.article.minuteEstimate} min',
             if (widget.article.difficulty != null)
               widget.article.difficulty!.label,
           ].join(' · '),

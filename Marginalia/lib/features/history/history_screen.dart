@@ -440,6 +440,10 @@ class DaySheet extends StatelessWidget {
                       fontSize: 10.5,
                       color: c.ink3,
                     )),
+              // The two counters are separate widgets, so they need their own
+              // gap: without it the row read `read 1×heard 2×` and looked like
+              // a typo in the reader's own record.
+              if (a.reads > 0 && a.listens > 0) const SizedBox(width: 8),
               if (a.listens > 0)
                 Text('heard ${a.listens}×',
                     style: TextStyle(

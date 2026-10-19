@@ -349,6 +349,16 @@ void main() {
   heard.countListen();
   check('a listen does not become a read', heard.reads == 0 && heard.listens == 1);
 
+  // "learned" is read AND listen, never either one alone
+  check('a read alone is not learned',
+      !isLearned(reads: 1, listens: 0));
+  check('a listen alone is not learned',
+      !isLearned(reads: 0, listens: 1));
+  check('both, once each, is learned',
+      isLearned(reads: 1, listens: 1));
+  check('more of each is still learned',
+      isLearned(reads: 4, listens: 2));
+
   // retire: the card leaves, but the article is archived, not destroyed
   final Queue retireQ = _queueWithTwoReadyOnePlanned();
   final Article? retired = retireQ.retireReadySlot(0, _planned('new'));
@@ -718,9 +728,31 @@ void main() {
   final WordPool starred = WordPool(<WordEntry>[]);
   starred.meet('heap', '2026-10-01');
   final double beforeStar = starred['heap']!.weightAsOf('2026-10-01');
-  starred['heap']!.setStarred(true, '2026-10-01');
+  starred['heap']!.addStar('2026-10-01');
   check('a star raises weight at once',
       starred['heap']!.weightAsOf('2026-10-01') > beforeStar);
+  check('one star owes exactly one showing',
+      starred['heap']!.starRemaining == 1);
+  starred['heap']!.addStar('2026-10-01');
+  check('a second star owes two showings',
+      starred['heap']!.starRemaining == 2);
+  check('an article that uses the word delivers one showing',
+      starred['heap']!.consumeShowing('The heap grew until it burst.'));
+  check('and one showing is still owed',
+      starred['heap']!.starRemaining == 1 && starred['heap']!.starred);
+  starred['heap']!.consumeShowing('Heap size is a useful thing to watch.');
+  check('the last showing ends the campaign',
+      starred['heap']!.starRemaining == 0 && !starred['heap']!.starred);
+  check('inflections count, lookalikes do not',
+      textUsesWord('The heaps grew.', 'heap') &&
+          textUsesWord('making a decision', 'make') &&
+          textUsesWord('stopped the car', 'stop') &&
+          !textUsesWord('an article about it', 'art'));
+
+  // a third star, after the campaign finished, asks for three
+  starred['heap']!.addStar('2026-10-02');
+  check('the third star starts a new campaign of three',
+      starred['heap']!.starRemaining == 3);
 
   // an old unstarred word leaves the active list but is still remembered
   final WordPool old = WordPool(<WordEntry>[]);

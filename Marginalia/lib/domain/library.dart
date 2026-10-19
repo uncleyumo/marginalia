@@ -181,7 +181,7 @@ class Library {
         // The live article wins: it is in memory, it was written by the writer
         // that is running now, and a ledger row may predate keywords entirely.
         keywords: a.keywords.isNotEmpty ? a.keywords : existing.keywords,
-        meta: '${a.wordCount} words · ${a.minuteEstimate} min',
+        meta: '${a.wordCount} words · ≈ ${a.minuteEstimate} min',
         // a live article's bytes come from the ledger if it has one
         reads: existing.reads,
         listens: existing.listens,

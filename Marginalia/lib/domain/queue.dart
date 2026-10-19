@@ -14,6 +14,20 @@ import 'plan.dart' show LengthBand;
 /// How many articles are always waiting. A constant, not a maximum.
 const int kQueueSize = 3;
 
+/// THE definition of "learned", stated once.
+///
+/// An article has done its job when the reader CONFIRMED a read at least once
+/// AND heard it all the way through at least once. Two different acts, both
+/// required: a listen is not a read, and one read-through of a paragraph is
+/// not the same as hearing the whole piece. A card that satisfies this leaves
+/// the queue; a card that satisfies only half of it stays.
+///
+/// It lives in `domain/` rather than in the shell because it is a rule, not a
+/// widget decision — and because it was got wrong twice by having two
+/// near-copies of it in different call sites.
+bool isLearned({required int reads, required int listens}) =>
+    reads > 0 && listens > 0;
+
 /// The states a cost line can be in. Prices are shown BEFORE the spend, and a
 /// "$0.002" beside an action that costs nothing is a lie the reader plans
 /// around.
@@ -83,9 +97,10 @@ class QueueRefusal {
 /// The queue. Every method that could spend money returns whether it did.
 ///
 /// Note what is absent: there is no `markFinished`, no `remove`, no
-/// `complete`. Reading is `LedgerEntry.countRead` and nothing else. An article
-/// leaves the queue only when the reader says they are done with it, and even
-/// then it is ARCHIVED into the ledger, not destroyed.
+/// `complete`. Reading and listening are counts, and [isLearned] states the one
+/// rule that turns those counts into "this card has done its job". A card can
+/// also leave because the reader said `Done with it`. In both cases the article
+/// is ARCHIVED into the ledger, not destroyed.
 class Queue {
   Queue(List<QueueSlot> initial)
       : _slots = List<QueueSlot>.of(initial) {

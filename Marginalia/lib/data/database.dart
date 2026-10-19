@@ -127,7 +127,17 @@ class DayLogRows extends Table {
 class WordRows extends Table {
   TextColumn get lemma => text()();
   IntColumn get encounters => integer().withDefault(const Constant(0))();
+
+  /// Whether a star campaign is still running. Kept as a column as well as the
+  /// quota below because it is what the Words screen groups by, and a row from
+  /// an older build reaches the app with only this flag set.
   BoolColumn get starred => boolean().withDefault(const Constant(false))();
+
+  /// Lifetime star taps, and showings already delivered in the current
+  /// campaign. [starCount] − [starDelivered] is what is still owed.
+  IntColumn get starCount => integer().withDefault(const Constant(0))();
+  IntColumn get starDelivered => integer().withDefault(const Constant(0))();
+
   TextColumn get starredAtDay => text().nullable()();
   TextColumn get lastMetDay => text().nullable()();
 
@@ -264,7 +274,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_open());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -470,6 +480,31 @@ class AppDatabase extends _$AppDatabase {
             // has been rebuilt in this migration chain. The trigger has to be
             // reinstalled after the last rebuild, not the first.
             await _installQueueTrigger(m);
+          }
+
+          // 3 → 4: a star became a FINITE promise.
+          //
+          // Before this, `starred` was a boolean and a starred word carried a
+          // weight that decayed over weeks: the reader could cancel it, but it
+          // never left "Crucial now" on its own and every prompt kept carrying
+          // it. A star now owes a number of showings (the lifetime star count),
+          // and the word leaves the front of the pool when the last one lands.
+          //
+          // An existing starred row becomes ONE owed showing, not zero: the
+          // reader asked for a repeat and has not had it under the new rule
+          // yet. The guarded column check makes this safe to re-enter after an
+          // interrupted upgrade.
+          if (from < 4) {
+            if (!await _hasColumn('word_rows', 'star_count')) {
+              await m.addColumn(wordRows, wordRows.starCount);
+            }
+            if (!await _hasColumn('word_rows', 'star_delivered')) {
+              await m.addColumn(wordRows, wordRows.starDelivered);
+            }
+            await m.database.customStatement(
+              'UPDATE word_rows SET star_count = 1, star_delivered = 0 '
+              'WHERE starred = 1 AND star_count = 0',
+            );
           }
         },
       );

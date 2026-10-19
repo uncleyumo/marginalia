@@ -27,6 +27,7 @@ import 'package:flutter/services.dart'
 
 import 'app/bottom_bar.dart';
 import 'core/design/tokens.dart';
+import 'core/util/motion.dart';
 import 'core/widgets/primitives.dart';
 import 'core/widgets/texture.dart';
 import 'data/audio.dart';
@@ -50,6 +51,7 @@ import 'domain/picture.dart';
 import 'domain/plan.dart';
 import 'domain/queue.dart';
 import 'domain/sequence.dart';
+import 'domain/stopwords.dart';
 import 'domain/word_pool.dart';
 import 'features/article/article_screen.dart';
 import 'features/article/listen_screen.dart';
@@ -386,9 +388,36 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   // ── the two keys and where they point ─────────────────────────────────
   String _writerId = 'deepseek';
   String _writerBase = WriterEndpoint.deepseek.baseUrl;
+
+  /// The model id sent to the writer. Empty means "whatever the provider
+  /// default is" — which is what makes a provider's new model usable without a
+  /// new APK: the reader types the id in Settings and the next write uses it.
+  String _writerModel = '';
+
   String _voiceBase = VoiceEndpoint.mimo.baseUrl;
   String _voiceName = VoiceEndpoint.mimo.voices.first;
+
+  /// The TTS model id. Empty means the provider default, for the same reason.
+  String _voiceModel = '';
   String _voiceSourceId = 'device';
+
+  /// The endpoint actually used for a request: the chosen provider, with the
+  /// reader's own base URL and model laid over it.
+  ///
+  /// This is the fix for two latent lies. The writer Base URL was editable,
+  /// saved and displayed — and never used, because every call site went through
+  /// `WriterEndpoint.byId` and its const `baseUrl`. The model had no setting at
+  /// all. Both now travel together through one getter so no call site can pick
+  /// up one of them and forget the other.
+  WriterEndpoint get _writerEndpoint {
+    final WriterEndpoint base = WriterEndpoint.byId(_writerId);
+    final String url = _writerBase.trim();
+    final String model = _writerModel.trim();
+    return base.copyWith(
+      baseUrl: url.isEmpty ? null : url,
+      model: model.isEmpty ? null : model,
+    );
+  }
 
   @override
   void initState() {
@@ -433,7 +462,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
     if (!_booted || _bootError != null) return;
-    unawaited(_maybeAutoWrite());
+    // Same repair pass as boot: a queue that finished while the app was being
+    // killed, or a card whose two counts landed a moment apart, is cleaned the
+    // next time the reader comes back.
+    unawaited(_reconcileQueue());
   }
 
   Future<void> _boot() async {
@@ -537,6 +569,18 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // The notice comes AFTER the queue is on screen, never in front of it. It is
     // an offer, not a gate.
     unawaited(_maybeShowSetupNotice());
+
+    // RECONCILE — and this is the line that fixes the queue a reader sees
+    // after upgrading. "Finished" used to mean "read once OR heard once", and
+    // older builds therefore left articles in the queue whose counts were
+    // already complete under the current rule. The live path retires them as
+    // they finish, but nothing ever cleaned a queue that was already full of
+    // them. This does: every card whose read and listen are both non-zero
+    // leaves now, and a new one is written if the queue has nothing untouched.
+    //
+    // It also covers the cold-launch write: a queue left with a plan is filled
+    // on opening, not only after the reader finishes something else.
+    unawaited(_reconcileQueue());
   }
 
   /// Preferences live in the settings table because they are not secrets: a
@@ -558,8 +602,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     final String? face = await get('ui:readingFace');
     final String? wid = await get('writer:id');
     final String? wbase = await get('writer:base');
+    final String? wmodel = await get('writer:model');
     final String? vbase = await get('voice:base');
     final String? vname = await get('voice:name');
+    final String? vmodel = await get('voice:model');
     final String? vsrc = await get('voice:source');
     // Listen behaviour. Absent means OFF / no-continue / newest — the quiet
     // defaults, so a reader who has never opened Settings is never surprised.
@@ -634,8 +680,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         orElse: () => ReadingFace.notoSerif,
       );
       _writerBase = wbase ?? endpoint.baseUrl;
+      _writerModel = wmodel ?? '';
       _voiceBase = vbase ?? VoiceEndpoint.mimo.baseUrl;
       _voiceName = vname ?? VoiceEndpoint.mimo.voices.first;
+      _voiceModel = vmodel ?? '';
       _voiceSourceId = vsrc ?? (hasVoice ? 'mimo' : 'device');
       // Only an explicit 'off' switches it off. Absent is ON — see the note
       // where it is read.
@@ -653,6 +701,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         apiKey: voiceKey ?? '',
         baseUrl: _voiceBase,
         voice: _voiceName,
+        model: _voiceModel,
       );
     });
 
@@ -690,7 +739,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       plan: _plan,
       request: request,
       apiKey: key,
-      endpoint: WriterEndpoint.byId(_writerId),
+      endpoint: _writerEndpoint,
     );
   }
 
@@ -1035,7 +1084,32 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         // Nothing left to go back to: leave.
         SystemNavigator.pop();
       },
-      child: _stack.isNotEmpty ? _stack.last() : _root(),
+      // ONE key decides what the transition is between: the tab, or the depth
+      // of the pushed stack. Without a key AnimatedSwitcher sees an unrelated
+      // widget on every shell rebuild and cross-fades the whole app whenever a
+      // counter changes.
+      child: AnimatedSwitcher(
+        duration: motionDuration(context, Ease.fast),
+        switchInCurve: Ease.outExpo,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (Widget child, Animation<double> animation) {
+          if (reducedMotion(context)) return child;
+          final Animation<Offset> slide = Tween<Offset>(
+            begin: const Offset(0, 0.015),
+            end: Offset.zero,
+          ).animate(animation);
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(position: slide, child: child),
+          );
+        },
+        child: KeyedSubtree(
+          key: ValueKey<String>(_stack.isNotEmpty
+              ? 'stack-${_stack.length}'
+              : 'tab-${_tab.name}'),
+          child: _stack.isNotEmpty ? _stack.last() : _root(),
+        ),
+      ),
     );
   }
 
@@ -1174,34 +1248,37 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         // The notice comes AFTER the list because it is a footnote about sound,
         // not an introduction to the queue.
         for (int i = 0; i < q.slots.length; i++)
-          QueueCard(
-            slot: _hydrated(q.slots[i]),
-            onOpen: () => _openArticle(q.slots[i]),
-            onMenu: () => _slotMenu(context, q, i),
-            onWrite: () => _write(q, i),
-            onReroll: () => _reroll(q, i),
-            // The camera, on the planned card only. See `_withPictures` for why
-            // it is wired on the CARD and not in the ⋯ menu: this is a
-            // two-second habit and a menu is not where two-second habits live.
-            onPictures: q.slots[i].isPlanned && !q.slots[i].isWriting
-                ? () => _withPictures(q, i)
-                : null,
-            // Read off the LIVE slot, not the hydrated copy. `_hydrated` returns
-            // a value object for rendering; the flag that says a call is in
-            // flight belongs to the slot the call is writing into.
-            writing: q.slots[i].isWriting,
-            // The card's price depends on whether a source is configured, so
-            // the card is told rather than left to assume. A reader with no
-            // optional keys still sees `Write it · ~$0.002`.
-            research: _canResearch,
-            // A bundled sample is not a generated article. Saying so on the
-            // card is the difference between "the writer keeps producing the
-            // same thing" and "this one shipped with the app".
-            isSample: _samples.containsKey(q.slots[i].articleId),
-            // What the reader has already done with it. Absent on a planned
-            // card — there is nothing to have read yet.
-            reads: _countOf(q.slots[i].articleId).reads,
-            listens: _countOf(q.slots[i].articleId).listens,
+          _revealCard(
+            q.slots[i],
+            QueueCard(
+              slot: _hydrated(q.slots[i]),
+              onOpen: () => _openArticle(q.slots[i]),
+              onMenu: () => _slotMenu(context, q, i),
+              onWrite: () => _write(q, i),
+              onReroll: () => _reroll(q, i),
+              // The camera, on the planned card only. See `_withPictures` for
+              // why it is wired on the CARD and not in the ⋯ menu: this is a
+              // two-second habit and a menu is not where two-second habits live.
+              onPictures: q.slots[i].isPlanned && !q.slots[i].isWriting
+                  ? () => _withPictures(q, i)
+                  : null,
+              // Read off the LIVE slot, not the hydrated copy. `_hydrated`
+              // returns a value object for rendering; the flag that says a call
+              // is in flight belongs to the slot the call is writing into.
+              writing: q.slots[i].isWriting,
+              // The card's price depends on whether a source is configured, so
+              // the card is told rather than left to assume. A reader with no
+              // optional keys still sees `Write it · ~$0.002`.
+              research: _canResearch,
+              // A bundled sample is not a generated article. Saying so on the
+              // card is the difference between "the writer keeps producing the
+              // same thing" and "this one shipped with the app".
+              isSample: _samples.containsKey(q.slots[i].articleId),
+              // What the reader has already done with it. Absent on a planned
+              // card — there is nothing to have read yet.
+              reads: _countOf(q.slots[i].articleId).reads,
+              listens: _countOf(q.slots[i].articleId).listens,
+            ),
           ),
         const SizedBox(height: 14),
         // A footnote, not a card. It used to wear the same surface and border
@@ -1211,6 +1288,40 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         const _Notice(),
 
       ],
+    );
+  }
+
+  /// A card that arrives instead of appearing.
+  ///
+  /// The key is the slot's IDENTITY AND STATE — not the writing flag. A plan
+  /// turning into an article changes the key, so the new card fades and rises;
+  /// a counter or a "writing…" flag changing does not, so the card stays put
+  /// while AnimatedSize absorbs the height difference. That distinction is what
+  /// keeps the queue from flickering on every rebuild.
+  Widget _revealCard(QueueSlot slot, Widget child) {
+    final String identity =
+        '${slot.articleId}-${slot.isPlanned ? 'plan' : 'ready'}';
+    return AnimatedSize(
+      duration: motionDuration(context, Ease.mid),
+      curve: Ease.outExpo,
+      alignment: Alignment.topCenter,
+      child: TweenAnimationBuilder<double>(
+        key: ValueKey<String>(identity),
+        tween: Tween<double>(begin: 0, end: 1),
+        duration: motionDuration(context, Ease.mid),
+        curve: Ease.outExpo,
+        builder: (BuildContext c, double t, Widget? inner) {
+          if (inner == null || reducedMotion(c)) return inner ?? const SizedBox();
+          return Opacity(
+            opacity: t,
+            child: Transform.translate(
+              offset: Offset(0, 10 * (1 - t)),
+              child: inner,
+            ),
+          );
+        },
+        child: child,
+      ),
     );
   }
 
@@ -1248,7 +1359,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
                       ? 'written, but the text is no longer on this phone'
                       : <String>[
                           '${slot.article?.wordCount ?? 0} words',
-                          '${slot.article?.minuteEstimate ?? 0} min read',
+                          '≈ ${slot.article?.minuteEstimate ?? 0} min',
                           // What has been done with it, in the menu too. The
                           // card above carries the same line, and repeating it
                           // here is not redundancy: the reader opened this menu
@@ -1431,24 +1542,117 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     }
     await _repo.saveQueue(q);
     setState(() {});
+    // The same promise `_retireAndRefill` keeps: saying "done" must never leave
+    // the queue with nothing the reader has yet to meet. The write is gated, so
+    // with automatic writing off the plan simply waits for a tap.
+    if (!await _hasUnreadCard(q)) {
+      unawaited(_maybeAutoWrite());
+    }
     Toast.show(context,
         '${retired.title} is in your library · not counted as a read');
   }
 
-  /// Heard or read all the way through: the card becomes a plan, and something
-  /// unread is guaranteed to be waiting.
+  /// [isLearned] is the domain's definition; this only adapts the record to
+  /// its named arguments.
+  static bool _isLearned(({int reads, int listens}) c) =>
+      isLearned(reads: c.reads, listens: c.listens);
+
+  /// Retire [articleId] if it is learned; otherwise leave it alone.
+  ///
+  /// Called after every count and on boot. Counts are read from the database
+  /// rather than inferred from the tap that just happened, because the second
+  /// half of the pair may have happened in an earlier session.
+  Future<void> _maybeRetireLearned(String articleId) async {
+    try {
+      final Map<String, ({int reads, int listens})> counts =
+          await _repo.countsFor(<String>[articleId]);
+      final ({int reads, int listens}) c =
+          counts[articleId] ?? (reads: 0, listens: 0);
+      if (!_isLearned(c)) return;
+    } catch (e) {
+      debugPrint('the learned check could not read the counts: $e');
+      return;
+    }
+    await _retireAndRefill(articleId);
+  }
+
+  /// Retire every card in the queue that has already been learned, then make
+  /// sure something new is on its way.
+  ///
+  /// This is the repair pass. It runs on cold launch and on resume, because
+  /// the live path can be interrupted — a killed process between the count and
+  /// the queue write, or a queue inherited from a build whose "finished" rule
+  /// was different — and a repair pass is the only thing that turns that state
+  /// back into a queue. It is idempotent and free until the final write, which
+  /// goes through the same gated automatic path as every other write.
+  Future<void> _reconcileQueue() async {
+    final Queue? q = _queue;
+    if (q == null) return;
+    bool changed = false;
+    try {
+      final Map<String, ({int reads, int listens})> counts =
+          await _repo.countsFor(<String>[
+        for (final QueueSlot s in q.slots)
+          if (s.isReady) s.articleId,
+      ]);
+      for (int i = 0; i < q.slots.length; i++) {
+        final QueueSlot s = q.slots[i];
+        if (!s.isReady || s.isWriting) continue;
+        final ({int reads, int listens}) c =
+            counts[s.articleId] ?? (reads: 0, listens: 0);
+        if (!_isLearned(c)) continue;
+        final Article? retired = q.retireReadySlot(i, _freePlan());
+        if (retired == null) continue;
+        changed = true;
+        try {
+          await _repo.recordLedger(
+            articleId: retired.id,
+            title: retired.title,
+            keywords: retired.keywords,
+            day: todayDay(),
+            kilobytes: (retired.wordCount * 6 ~/ 1024) + 1,
+          );
+        } catch (e) {
+          debugPrint('the article could not be archived: $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('the queue could not be reconciled: $e');
+    }
+    if (changed) {
+      try {
+        await _repo.saveQueue(q);
+      } catch (e) {
+        debugPrint('the reconciled queue could not be saved: $e');
+      }
+      if (mounted) setState(() {});
+    }
+    // ALWAYS AT LEAST ONE UNTOUCHED ARTICLE. `_maybeAutoWrite` turns the first
+    // waiting plan into a ready card — which is what makes the queue's promise
+    // true again after a learned card left. It still has the last word: off, no
+    // key or a full month means the plan card waits for the reader rather than
+    // the app spending on its own. Calling it when there IS already something
+    // untouched is harmless: it only ever writes a PLANNED card.
+    final bool hasUnread = await _hasUnreadCard(q);
+    if (!hasUnread || q.hasPlannedSlot) {
+      await _maybeAutoWrite();
+    }
+  }
+
+  /// LEARNED: confirmed read AND full listen. The card becomes a plan, and
+  /// something untouched is guaranteed to be waiting.
   ///
   /// WHY THIS IS NOT `_doneWithIt`. That method is the reader saying "I am done
   /// with this" — a deliberate act on one card, guarded by a last-one check so
   /// a curious tap cannot empty the queue. This is the app noticing that the
   /// reader finished something, which is not a decision and must not be
-  /// refusable: a queue of three articles all read through is the state in the
-  /// bug report, and nothing in the app would ever have changed it.
+  /// refusable: a queue of three articles all read and heard is the state in
+  /// the bug report, and nothing in the app would ever have changed it.
   ///
   /// The last-one guard is therefore deliberately ABSENT here. The order of the
-  /// three steps below is what makes that safe: the plan is installed FIRST, so
+  /// steps below is what makes that safe: the plan is installed FIRST, so
   /// there is never a moment with fewer cards, and a write is started only if
-  /// the queue has nothing unread left.
+  /// the queue has nothing untouched left.
   ///
   /// FREE. Installing a plan costs nothing; the write that may follow is the
   /// same gated write a tap would start.
@@ -1877,6 +2081,15 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
 
     final String? key = await _keys.writer();
     if (key == null || key.trim().isEmpty) {
+      // An AUTOMATIC write with no key is silent. Nobody asked for it, and the
+      // old path opened Settings and showed a toast on every launch — a reader
+      // who had deliberately not configured a writer got an unexplained screen
+      // they never requested. A manual tap still explains itself and offers
+      // the place to fix it.
+      if (auto) {
+        _releaseWrite();
+        return;
+      }
       Toast.show(context, 'no writer key is saved — nothing was spent');
       _push(_settings);
       // Nothing was claimed and nothing was spent, so nothing is released
@@ -1886,7 +2099,8 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       return;
     }
 
-    final WriterEndpoint ep = WriterEndpoint.byId(_writerId);
+    // The reader's own base URL and model, not the const provider defaults.
+    final WriterEndpoint ep = _writerEndpoint;
 
     // THE PICTURE GATE, and it is before the key check is spent rather than
     // after — a text-only model answers a content array with
@@ -1936,14 +2150,26 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     final List<NewsItem> news;
     final List<String> recent;
     final List<String> met;
+    final List<String> mustUse;
     try {
       agent = await _buildAgent(ep, key);
       news = _newsForThisWrite;
       recent = await _recentTitles();
+      final String day = todayDay();
+      // Starred words that still owe showings are a PROMISE; the rest of the
+      // crucial list is an offer. They are sent as two lists so the writer
+      // cannot read "use four to six of these" over a word the reader has
+      // starred twice and still owes three showings.
+      mustUse = <String>[
+        for (final WordEntry w
+            in _pool?.starredDue(day) ?? const <WordEntry>[])
+          w.lemma,
+      ];
+      final Set<String> promised = mustUse.toSet();
       met = <String>[
         for (final WordEntry w
-            in _pool?.crucial(todayDay()) ?? const <WordEntry>[])
-          w.lemma,
+            in _pool?.crucial(day) ?? const <WordEntry>[])
+          if (!promised.contains(w.lemma)) w.lemma,
       ];
     } catch (e) {
       debugPrint('the research could not be assembled: $e');
@@ -1978,6 +2204,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         news: news,
         recentTitles: recent,
         metWords: met,
+        mustUseWords: mustUse,
         pictures: pictures,
         agent: agent,
         onResult: (AgentResult r) => ran = r,
@@ -2057,6 +2284,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // the `mounted` check, not after: an unmounted shell still has to leave the
     // world writable for the next one.
     _releaseWrite();
+    // A star is kept countable. Only words that ACTUALLY appear in the landed
+    // article give up one owed showing; a writer that ignored the instruction
+    // leaves the promise intact for the next run. Settled after the article is
+    // safely on disk, because a failed save bought the reader nothing and must
+    // not quietly consume a showing they asked for.
+    unawaited(_settleStarQuotas(mustUse, article));
     if (!mounted) return;
     setState(() {});
     // The call count is the REAL one, out of the loop. It used to say "one
@@ -2079,6 +2312,38 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       '${article.title} is ready · ~${article.wordCount} words · $callLine'
       ' · $sizeLine${auto ? ' · auto' : ''}',
     );
+  }
+
+  /// Turn each promised word's appearance into one delivered showing.
+  ///
+  /// The check is on the ARTICLE'S TEXT, not on the writer's obedience: a model
+  /// that says "I used it" while never writing the word must not burn a
+  /// promise. Matching is word-level and accepts ordinary inflections — see
+  /// [textUsesWord].
+  Future<void> _settleStarQuotas(
+      List<String> promised, Article article) async {
+    final WordPool? pool = _pool;
+    if (pool == null || promised.isEmpty) return;
+    final String text = <String>[
+      article.title,
+      for (final Sentence s in article.sentences) s.english,
+    ].join(' ');
+    final List<WordEntry> changed = <WordEntry>[];
+    for (final String lemma in promised) {
+      final WordEntry? e = pool[lemma];
+      if (e != null && e.consumeShowing(text)) changed.add(e);
+    }
+    if (changed.isEmpty) return;
+    for (final WordEntry e in changed) {
+      try {
+        await _repo.saveWordStar(e);
+      } catch (err) {
+        // Not fatal to the article: it is already on the phone. The word keeps
+        // its in-memory state and the next write persists again.
+        debugPrint('the star quota for ${e.lemma} could not be saved: $err');
+      }
+    }
+    if (mounted) setState(() {});
   }
 
   // ── the automatic write ────────────────────────────────────────────────
@@ -2401,7 +2666,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         // The writer's ability is checked HERE rather than after the pictures
         // are picked, so a reader on a text-only model is told before they have
         // gone to their gallery and back.
-        canSeePictures: WriterEndpoint.byId(_writerId).supportsVision,
+        canSeePictures: _writerEndpoint.supportsVision,
       ),
     );
     if (req == null || req.isEmpty || !mounted) return;
@@ -2595,6 +2860,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     setState(() {});
     unawaited(_loadListenCounts(a.id));
     unawaited(_loadQueueCounts());
+    // The other half of "learned". A listen on its own never retires a card:
+    // the rule needs a confirmed read AND a full listen, and this checks both
+    // from the database so a read from last week still counts.
+    unawaited(_maybeRetireLearned(a.id));
   }
 
   /// One completed play-through. Counting lives HERE rather than on Play,
@@ -2622,8 +2891,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   Future<void> _onListenFinished(Article a) async {
     await _countListen(a);
     if (!mounted) return;
-    // Heard all the way through: the card has done its job.
-    await _retireAndRefill(a.id);
+    // Heard all the way through — but a listen is only half of learned. The
+    // card retires when the reader has ALSO confirmed a read; `_countListen`
+    // already started that check, and awaiting it here keeps the queue change
+    // ahead of the auto-continue decision below.
+    await _maybeRetireLearned(a.id);
     if (!mounted) return;
     if (_listenAutoContinue == 'off' || _listenAutoContinue == 'loop') return;
     if (_listenAutoContinue == 'count') {
@@ -2959,10 +3231,10 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // the count they just paid attention to is invisible where they will look
     // for it next.
     unawaited(_loadQueueCounts());
-    // Read all the way through, so the card has done its job. Not awaited: the
-    // toast is about the READ, and a reader who has just tapped a button should
-    // not wait on a queue write to see it land.
-    unawaited(_retireAndRefill(a.id));
+    // A read counts only when the listener has already heard this one too.
+    // Not awaited: the toast is about the READ, and a reader who has just
+    // tapped a button should not wait on a queue write to see it land.
+    unawaited(_maybeRetireLearned(a.id));
     Toast.show(
       context,
       _readsToday <= 1
@@ -2996,7 +3268,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // met it, and it costs nothing.
     final WordPool? pool = _pool;
     final String key = surface.toLowerCase();
-    if (pool != null) {
+    // Function words are answered but not recorded. They were the bulk of
+    // "Your words" — `the`, `and`, `for`, `has` — and a review list padded with
+    // them hides the words that actually need another showing. The lookup
+    // itself still works; only the history write is skipped.
+    final bool worthKeeping = !isStopword(key);
+    if (pool != null && worthKeeping) {
       pool.meet(key, day);
       await _repo.meetWord(key, day);
       if (mounted) setState(() {});
@@ -3017,8 +3294,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         surface: surface,
         entry: const DictEntry(ipa: '', pos: '', en: '', cn: ''),
         miss: LookupMiss.notLoaded,
-        starred: entry?.starred ?? false,
-        onToggleStar: (bool next) => _setStarred(key, next, day),
+        starrable: entry != null,
+        starCount: entry?.starCount ?? 0,
+        starRemaining: entry?.starRemaining ?? 0,
+        onStar: () => _starWord(key),
+        onUnstar: () => _unstarWord(key),
         onSpeak: () => _speakWord(surface),
         dictionary: dict,
       );
@@ -3033,12 +3313,15 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       surface: surface,
       entry: resolved,
       miss: miss,
-      starred: entry?.starred ?? false,
+      starrable: entry != null,
+      starCount: entry?.starCount ?? 0,
+      starRemaining: entry?.starRemaining ?? 0,
       lemma: entry?.lemma != null && entry!.lemma != key ? entry.lemma : null,
       weightFraction: pool == null || entry == null
           ? null
           : selectionChance(entry, pool.all(), day),
-      onToggleStar: (bool next) => _setStarred(key, next, day),
+      onStar: () => _starWord(key),
+      onUnstar: () => _unstarWord(key),
       onSpeak: () => _speakWord(surface),
       dictionary: dict,
     );
@@ -3055,30 +3338,76 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// already exists — DESIGN is explicit that a star must not trigger
   /// generation, because that would spend money nobody agreed to spend.
   ///
-  /// The sheet flips its own state on the tap; this is the write behind it, and
-  /// it takes the reader's intended value rather than flipping again. Two
-  /// independent inversions of the same boolean is how a control ends up doing
-  /// nothing when tapped twice.
-  Future<void> _setStarred(String lemma, bool next, String day) async {
+  /// A star is now ADDITIVE and finite: every tap raises the number of future
+  /// articles that must use the word, and once those showings have landed the
+  /// word leaves "Crucial now" on its own. That is the difference between a
+  /// request the app can keep and a flag that follows the reader forever.
+  Future<void> _starWord(String lemma) async {
     final WordPool? pool = _pool;
     final WordEntry? e = pool?[lemma];
     if (e == null) return;
-    if (e.starred == next) return;
-    e.setStarred(next, day);
-    await _repo.setStarred(lemma, next, day);
+    // The entry is mutated first so the screen answers on this frame; if the
+    // write fails, put the old state back rather than leaving the UI claiming
+    // a promise the database does not have.
+    final bool wasStarred = e.starred;
+    final int wasCount = e.starCount;
+    final int wasDelivered = e.starDelivered;
+    final String? wasDay = e.starredAtDay;
+    e.addStar(todayDay());
+    try {
+      await _repo.saveWordStar(e);
+    } catch (err) {
+      e.starred = wasStarred;
+      e.starCount = wasCount;
+      e.starDelivered = wasDelivered;
+      e.starredAtDay = wasDay;
+      if (!mounted) return;
+      setState(() {});
+      Toast.show(context, 'that star could not be saved · $err');
+      return;
+    }
     if (!mounted) return;
     setState(() {});
+    final int owed = e.starRemaining;
     Toast.show(
       context,
-      next
-          ? 'starred · it comes round again sooner, and nothing is rewritten'
-          : 'removed from the front of the pool',
+      owed == 1
+          ? 'starred ${e.starCount}× · the next article will use it'
+          : 'starred ${e.starCount}× · it is owed $owed more articles',
     );
   }
 
+  /// "Stop asking for this one." Clears the campaign; the next star starts a
+  /// new count instead of inheriting one the reader cancelled.
+  Future<void> _unstarWord(String lemma) async {
+    final WordPool? pool = _pool;
+    final WordEntry? e = pool?[lemma];
+    if (e == null || !e.starred) return;
+    final bool wasStarred = e.starred;
+    final int wasCount = e.starCount;
+    final int wasDelivered = e.starDelivered;
+    final String? wasDay = e.starredAtDay;
+    e.clearStar();
+    try {
+      await _repo.saveWordStar(e);
+    } catch (err) {
+      e.starred = wasStarred;
+      e.starCount = wasCount;
+      e.starDelivered = wasDelivered;
+      e.starredAtDay = wasDay;
+      if (!mounted) return;
+      setState(() {});
+      Toast.show(context, 'that change could not be saved · $err');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {});
+    Toast.show(context, 'stopped · it is still in your words, without a star');
+  }
+
   /// The Words screen's star, which passes an explicit intent rather than a tap.
-  Future<void> _setStarredFromList(String lemma, bool next) =>
-      _setStarred(lemma, next, todayDay());
+  Future<void> _starWordFromList(String lemma) => _starWord(lemma);
+  Future<void> _unstarWordFromList(String lemma) => _unstarWord(lemma);
 
   // ── library ───────────────────────────────────────────────────────────
 
@@ -3340,30 +3669,51 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     final WordPool? pool = _pool;
     if (pool == null) return const Center(child: Text('…'));
     final String day = todayDay();
+    // `pool.all()` used to be called TWICE PER ROW — once for the row and
+    // again inside `selectionChance`, each call re-sorting the whole pool. On a
+    // few hundred words that is hundreds of thousands of comparisons per
+    // frame. The list and its total weight are computed once, and both sections
+    // are built from them.
+    final List<WordEntry> entries = pool.all();
+    final double totalWeight = entries.fold<double>(
+      0.0,
+      (double sum, WordEntry e) => sum + e.weightAsOf(day),
+    );
+    double fractionOf(WordEntry e) =>
+        totalWeight <= 0 ? 0 : e.weightAsOf(day) / totalWeight;
+
     final List<WordRow> crucial = pool
         .crucial(day)
         .map((WordEntry e) => WordRow(
               lemma: e.lemma,
               encounters: e.encounters,
               starred: e.starred,
-              fraction: selectionChance(e, pool.all(), day),
+              starCount: e.starCount,
+              starRemaining: e.starRemaining,
+              fraction: fractionOf(e),
             ))
         .toList();
-    final List<WordRow> all = pool
-        .all()
+    final List<WordRow> all = entries
         .map((WordEntry e) => WordRow(
               lemma: e.lemma,
               encounters: e.encounters,
               starred: e.starred,
-              fraction: selectionChance(e, pool.all(), day),
+              starCount: e.starCount,
+              starRemaining: e.starRemaining,
+              fraction: fractionOf(e),
             ))
         .toList();
 
     return WordsScreen(
       crucial: crucial,
       all: all,
-      onStar: _setStarredFromList,
+      onStar: _starWordFromList,
+      onUnstar: _unstarWordFromList,
       onOpen: (String lemma) => _openWord(lemma),
+      // Words is a bottom-bar tab, not a pushed screen, so this calls the tab
+      // switcher rather than `_pop`. It was left null, and the header rendered
+      // a label that looked like every other header button and did nothing.
+      onBack: _toQueue,
     );
   }
 
@@ -3381,8 +3731,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       surface: lemma,
       entry: e,
       miss: miss,
-      starred: _pool?[lemma]?.starred ?? false,
-      onToggleStar: (bool next) => _setStarred(lemma, next, todayDay()),
+      starrable: _pool?[lemma] != null,
+      starCount: _pool?[lemma]?.starCount ?? 0,
+      starRemaining: _pool?[lemma]?.starRemaining ?? 0,
+      onStar: () => _starWord(lemma),
+      onUnstar: () => _unstarWord(lemma),
       onSpeak: () => _speakWord(lemma),
       dictionary: dict,
     );
@@ -3404,10 +3757,12 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         plan: _plan,
         writerId: _writerId,
         writerBase: _writerBase,
+        writerModel: _writerModel,
         writerKeySaved: _hasWriterKey,
         voiceSource: _voiceSourceId,
         voiceBase: _voiceBase,
         voiceName: _voiceName,
+        voiceModel: _voiceModel,
         voiceKeySaved: _hasVoiceKey,
         deviceVoice: _audio.deviceVoice,
         appearance: _appearance,
@@ -3446,16 +3801,31 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       },
       onWriterSelected: (String id) {
         final WriterEndpoint ep = WriterEndpoint.byId(id);
+        // Tapping the provider that is ALREADY selected is not a switch, and
+        // it must not wipe the reader's custom base URL or model id. Only a
+        // real change resets the two values that belong to the old provider —
+        // a model id from DeepSeek sent to OpenAI can only be refused.
+        final bool changed = ep.id != _writerId;
         setState(() {
           _writerId = ep.id;
-          _writerBase = ep.baseUrl;
+          if (changed) {
+            _writerBase = ep.baseUrl;
+            _writerModel = '';
+          }
         });
         unawaited(_save('writer:id', ep.id));
-        unawaited(_save('writer:base', ep.baseUrl));
+        if (changed) {
+          unawaited(_save('writer:base', ep.baseUrl));
+          unawaited(_save('writer:model', ''));
+        }
       },
       onWriterBaseChanged: (String base) {
         setState(() => _writerBase = base);
         unawaited(_save('writer:base', base));
+      },
+      onWriterModelChanged: (String model) {
+        setState(() => _writerModel = model);
+        unawaited(_save('writer:model', model));
       },
       onWriterKeyChanged: (String key) async {
         await _keys.saveWriter(key);
@@ -3479,6 +3849,11 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       onVoiceNameChanged: (String name) {
         setState(() => _voiceName = name);
         unawaited(_save('voice:name', name));
+        unawaited(_applyVoice());
+      },
+      onVoiceModelChanged: (String model) {
+        setState(() => _voiceModel = model);
+        unawaited(_save('voice:model', model));
         unawaited(_applyVoice());
       },
       onVoiceKeyChanged: (String key) async {
@@ -3511,7 +3886,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         if (key == null) return 'No key is saved, so nothing was sent.';
         try {
           await _api.testWriter(
-            endpoint: WriterEndpoint.byId(_writerId),
+            endpoint: _writerEndpoint,
             apiKey: key,
           );
           return null;
@@ -3716,6 +4091,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       apiKey: key ?? '',
       baseUrl: _voiceBase,
       voice: _voiceName,
+      model: _voiceModel,
     );
     if (mounted) setState(() {});
   }

@@ -994,6 +994,8 @@ class LibraryRepository {
               lemma: r.lemma,
               encounters: r.encounters,
               starred: r.starred,
+              starCount: r.starCount,
+              starDelivered: r.starDelivered,
               starredAtDay: r.starredAtDay,
               lastMetDay: r.lastMetDay,
             ))
@@ -1024,15 +1026,21 @@ class LibraryRepository {
     ));
   }
 
-  /// Star it. The weight rises immediately and no article is ever rewritten —
-  /// DESIGN is explicit: starring must not trigger generation, because that
-  /// would spend money the reader did not agree to spend.
-  Future<void> setStarred(String lemma, bool starred, String day) async {
+  /// Write a word's star state.
+  ///
+  /// One method for starring, cancelling and consuming a showing, because all
+  /// three change the same four columns and a second write path is a second
+  /// place for `starCount` and `starDelivered` to disagree. Starring never
+  /// rewrites an article and never triggers generation — DESIGN is explicit:
+  /// a star must not spend money the reader did not agree to spend.
+  Future<void> saveWordStar(WordEntry word) async {
     await (db.update(db.wordRows)
-          ..where(($WordRowsTable t) => t.lemma.equals(lemma)))
+          ..where(($WordRowsTable t) => t.lemma.equals(word.lemma)))
         .write(WordRowsCompanion(
-      starred: Value(starred),
-      starredAtDay: Value(starred ? day : null),
+      starred: Value(word.starred),
+      starCount: Value(word.starCount),
+      starDelivered: Value(word.starDelivered),
+      starredAtDay: Value(word.starredAtDay),
     ));
   }
 

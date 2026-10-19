@@ -321,21 +321,32 @@ class QueueCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            Text(
-              // The difficulty rides on the meta line rather than getting a
-              // badge of its own. It is a fact about the text, in the same class
-              // as its length and its reading time — and this card already
-              // spends its one accent on the jade "ready" dot. A second colour
-              // here would be the second emphasis the design forbids.
-              <String>[
-                '${a.wordCount} words',
-                '${a.minuteEstimate} min read',
-                if (a.difficulty != null) a.difficulty!.label,
-              ].join(' · '),
-              style: TextStyle(
-                fontFamily: TypeScale.mono,
-                fontSize: 10.5,
-                color: c.ink3,
+            Tooltip(
+              // The tilde carries most of this, but the card is where the
+              // question gets asked, so the answer belongs here too: this is a
+              // property of the TEXT, computed from its word count. Nothing in
+              // the app times how long the reader sits on a page.
+              message: 'estimated from the word count · nothing is being timed',
+              child: Text(
+                // The difficulty rides on the meta line rather than getting a
+                // badge of its own. It is a fact about the text, in the same
+                // class as its length and its reading time — and this card
+                // already spends its one accent on the jade "ready" dot. A
+                // second colour here would be the second emphasis the design
+                // forbids.
+                <String>[
+                  '${a.wordCount} words',
+                  // A word-count ESTIMATE, not elapsed time. The real record is
+                  // `read 1×` below, which only appears after the reader counts
+                  // a read.
+                  '≈ ${a.minuteEstimate} min',
+                  if (a.difficulty != null) a.difficulty!.label,
+                ].join(' · '),
+                style: TextStyle(
+                  fontFamily: TypeScale.mono,
+                  fontSize: 10.5,
+                  color: c.ink3,
+                ),
               ),
             ),
 

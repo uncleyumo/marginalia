@@ -86,6 +86,22 @@ class WriterEndpoint {
   /// is spent, and the reader is told which endpoints would have taken them.
   final bool supportsVision;
 
+  /// The same endpoint with the reader's own address or model id.
+  ///
+  /// Model ids are a moving target: providers add, rename and retire them on
+  /// their own schedule. Baking the id into the APK meant every new model
+  /// needed a new build, so the two values that identify a request — the base
+  /// URL and the model — are now runtime settings. The provider defaults above
+  /// remain the fallback, which is what a reader who never opens Settings gets.
+  WriterEndpoint copyWith({String? baseUrl, String? model}) => WriterEndpoint(
+        id: id,
+        name: name,
+        baseUrl: (baseUrl ?? this.baseUrl).trim(),
+        model: (model ?? this.model).trim(),
+        costLine: costLine,
+        supportsVision: supportsVision,
+      );
+
   /// The sentence shown when a reader attaches a picture to a writer that
   /// cannot see it. Names the alternatives, because "not supported" on its own
   /// leaves the reader holding a photograph with nowhere to put it.
@@ -403,13 +419,16 @@ class RemoteApi {
     required String apiKey,
     required String text,
     required String voice,
+    String model = '',
     String instruction = kNarratorInstruction,
   }) async {
     final http.Response res = await _post(
       url: '$baseUrl/chat/completions',
       apiKey: apiKey,
       body: <String, Object?>{
-        'model': VoiceEndpoint.mimo.model,
+        // Empty means "the provider default". A reader who never opens
+        // Settings sends exactly the bytes earlier builds sent.
+        'model': model.trim().isEmpty ? VoiceEndpoint.mimo.model : model.trim(),
         'messages': <Map<String, String>>[
           <String, String>{'role': 'user', 'content': instruction},
           <String, String>{'role': 'assistant', 'content': text},
@@ -453,12 +472,14 @@ class RemoteApi {
     required String baseUrl,
     required String apiKey,
     required String voice,
+    String model = '',
   }) async {
     await speak(
       baseUrl: baseUrl,
       apiKey: apiKey,
       text: 'Marginalia.',
       voice: voice,
+      model: model,
     );
   }
 

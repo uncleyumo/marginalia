@@ -94,12 +94,25 @@ class SubjectSuggester {
   final List<String> _recent = <String>[];
   static const int _memory = 16;
 
-  String next({Iterable<String> avoid = const <String>[]}) {
+  /// [preferred] is tried FIRST: today's headlines are fresher than a fixed
+  /// catalogue, and the app already has them for free when the news source is
+  /// configured. The built-in list is the offline / no-key fallback and the
+  /// floor that keeps a plan card from ever being blank.
+  String next({
+    Iterable<String> avoid = const <String>[],
+    Iterable<String> preferred = const <String>[],
+  }) {
     final Set<String> blocked = <String>{...avoid, ..._recent};
     List<String> pool = <String>[
-      for (final String s in kSuggestedSubjects)
-        if (!blocked.contains(s)) s,
+      for (final String s in preferred)
+        if (s.trim().isNotEmpty && !blocked.contains(s.trim())) s.trim(),
     ];
+    if (pool.isEmpty) {
+      pool = <String>[
+        for (final String s in kSuggestedSubjects)
+          if (!blocked.contains(s)) s,
+      ];
+    }
     // Every subject was just used (only possible after dozens of draws in one
     // session). Forget the short-term memory rather than returning a duplicate
     // from the caller's avoid list.

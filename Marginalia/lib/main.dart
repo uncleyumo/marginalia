@@ -307,6 +307,16 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   /// meaningless. The draw is local and free, and the card carries the sentence
   /// all the way to the writer.
   final SubjectSuggester _suggester = SubjectSuggester();
+
+  /// Today's Zhihu Daily headlines, when the reader configured that source.
+  ///
+  /// Fetched once per launch (unawaited, free, and optional) and used as the
+  /// PREFERRED pool for plan previews. A headline is fresher than any fixed
+  /// list, and the source is already integrated for writing — this just lets the
+  /// card show one of its subjects before any money is spent. Empty means the
+  /// built-in catalogue is used: no key, the source switched off, offline, or
+  /// the request has not finished yet.
+  List<String> _subjectSeeds = const <String>[];
   bool _booted = false;
   bool _noticeShown = false;
   String? _openId;
@@ -471,6 +481,8 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
     if (!_booted || _bootError != null) return;
+    // Headlines age; refresh the preview pool when the reader comes back.
+    unawaited(_refreshSubjectSeeds());
     // Same repair pass as boot: a queue that finished while the app was being
     // killed, or a card whose two counts landed a moment apart, is cleaned the
     // next time the reader comes back.
@@ -543,6 +555,9 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // Preferences and keys. Read BEFORE the first frame so the notice and the
     // settings hub state what is actually configured rather than a guess.
     await _loadPreferences();
+    // Free, optional, and off the critical path: today's headlines give plan
+    // previews a fresher pool than the built-in catalogue.
+    unawaited(_refreshSubjectSeeds());
 
     if (!mounted) return;
     debugPrint('boot: samples are ${samples.length}, showing the queue');
@@ -855,15 +870,47 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       for (final QueueSlot s in _queue?.slots ?? const <QueueSlot>[])
         if (s.isPlanned && s.instruction.trim().isNotEmpty) s.instruction,
     };
-    final String subject = _suggester.next(avoid: blocked);
+    final String subject =
+        _suggester.next(avoid: blocked, preferred: _subjectSeeds);
     return QueueSlot(
       articleId: 'plan-${DateTime.now().millisecondsSinceEpoch}-$_planCounter',
       state: SlotState.planned,
       instruction: subject,
-      instructionId: kSuggestedInstructionId,
+      instructionId: _subjectSeeds.contains(subject)
+          ? kHeadlineInstructionId
+          : kSuggestedInstructionId,
       plannedWords: _plan.wordsFor(band),
       plannedBand: band,
     );
+  }
+
+  /// Fetch today's headlines for plan previews.
+  ///
+  /// One request, free, and entirely optional. It does NOT write anything and
+  /// does not call a model: it only gives `_freePlan` a fresher pool of subjects
+  /// than the built-in catalogue. A failure leaves the catalogue in place, which
+  /// is why this is unawaited and never reports an error.
+  Future<void> _refreshSubjectSeeds() async {
+    if (!_newsOn) return;
+    try {
+      final String? key = await _keys.news();
+      if (key == null || key.trim().isEmpty) return;
+      final NewsSource source = NewsSource();
+      try {
+        final List<NewsItem> items = await source.hotboard(apiKey: key);
+        final List<String> titles = <String>[
+          for (final NewsItem n in items)
+            if (n.title.trim().isNotEmpty) n.title.trim(),
+        ];
+        if (!mounted || titles.isEmpty) return;
+        setState(() => _subjectSeeds = titles);
+      } finally {
+        source.close();
+      }
+    } catch (e) {
+      // No key, no network, endpoint moved: the catalogue still works.
+      debugPrint('plan previews will use the built-in subjects: $e');
+    }
   }
 
   /// One of the three bands, uniformly. Seeded from the clock, because a queue
@@ -1816,7 +1863,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
       index,
       instruction: req.instruction,
       instructionId:
-          stillSuggested ? kSuggestedInstructionId : req.instructionId,
+          stillSuggested ? slot.instructionId : req.instructionId,
       // `fromSaved` is what keeps a non-null id; without it, picking a saved
       // instruction in this sheet silently dropped its id and the manager's
       // "most recently used" order never moved.
@@ -2271,7 +2318,7 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
     // The instruction was used. Recording it is what makes the picker's order
     // mean anything — "most recently used" is a fact this line creates.
     final String? instructionId = slot.instructionId;
-    if (instructionId != null && instructionId != kSuggestedInstructionId) {
+    if (instructionId != null && !isSuggestionId(instructionId)) {
       unawaited(_repo.touchInstruction(instructionId, todayDay()));
     }
 

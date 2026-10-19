@@ -299,6 +299,18 @@ class DayLogRow {
 /// reader typed it. The shell skips `touchInstruction` for it.
 const String kSuggestedInstructionId = 'suggested';
 
+/// The same sentinel for a subject drawn from today's headlines.
+///
+/// It is separate only so the card can say where the suggestion came from —
+/// "from today's Zhihu Daily" is a useful fact when the reader wonders why the
+/// title is in Chinese while the article will be in English.
+const String kHeadlineInstructionId = 'headline-suggested';
+
+/// Whether [id] marks a subject the APP proposed rather than one the reader
+/// typed or picked.
+bool isSuggestionId(String? id) =>
+    id == kSuggestedInstructionId || id == kHeadlineInstructionId;
+
 /// One slot in the queue. Exactly one of [state] and the article fields is
 /// meaningful, and which one is stated by [state] — not inferred from nulls.
 class QueueSlot {
@@ -373,8 +385,11 @@ class QueueSlot {
   ///
   /// The label still shows it, because a plan the reader cannot see is a plan
   /// they cannot decide about — the whole point of the suggestion.
-  bool get isSuggested =>
-      !isFreePick && instructionId == kSuggestedInstructionId;
+  bool get isSuggested => !isFreePick && isSuggestionId(instructionId);
+
+  /// The subject came from today's headline list, not the local catalogue.
+  bool get isHeadlineSuggestion =>
+      !isFreePick && instructionId == kHeadlineInstructionId;
 
   /// The label a planned card carries in its title position.
   ///
@@ -387,9 +402,13 @@ class QueueSlot {
   /// place the card distinguishes "you asked for this" from "the writer chose".
   String get subjectNote => isFreePick
       ? 'the writer picks the subject'
-      : isSuggested
-          ? 'suggested for you · change it or write your own'
-          : (instructionId == null ? 'your instruction' : 'a saved instruction');
+      : isHeadlineSuggestion
+          ? "from today's Zhihu Daily · change it or write your own"
+          : isSuggested
+              ? 'suggested for you · change it or write your own'
+              : (instructionId == null
+                  ? 'your instruction'
+                  : 'a saved instruction');
 
   /// What a planned card says about length. The number is what will be asked
   /// for; the band is where it came from, and saying both is what keeps the

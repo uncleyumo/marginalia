@@ -399,6 +399,28 @@ void main() {
   check('every suggestion is a concrete sentence',
       kSuggestedSubjects.every((String s) => s.trim().split(' ').length >= 4));
 
+  // Headlines are preferred when the news source supplied them.
+  final SubjectSuggester newsSeed = SubjectSuggester();
+  final String fromNews =
+      newsSeed.next(preferred: <String>['A headline from today', 'Another one']);
+  check('a preferred headline is used before the catalogue',
+      fromNews == 'A headline from today' || fromNews == 'Another one');
+
+  final QueueSlot headlineCard = QueueSlot(
+    articleId: 'h1',
+    state: SlotState.planned,
+    instruction: 'A headline from today',
+    instructionId: kHeadlineInstructionId,
+    plannedWords: 180,
+    plannedBand: LengthBand.short,
+  );
+  check('the card says where a headline came from',
+      headlineCard.subjectNote.contains('Zhihu Daily'));
+  check('both sentinels are suggestions',
+      isSuggestionId(kSuggestedInstructionId) &&
+          isSuggestionId(kHeadlineInstructionId) &&
+          !isSuggestionId('ins-123'));
+
   // ── 4. counts are not storage ─────────────────────────────────────────
   section('4. freeing space keeps the counts');
   final LedgerEntry freed = LedgerEntry(
